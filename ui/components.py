@@ -48,15 +48,6 @@ def icon_img(name: str, size: int = 32, extra_style: str = "") -> str:
     return f'<img src="{data_uri}" alt="{name}" style="width:{size}px;height:{size}px;{extra_style}"/>'
 
 
-def clear_guided_answer_inputs():
-    """Remove temporary answer widgets from session state."""
-    keys_to_delete = [
-        key for key in st.session_state.keys() if key.startswith("guided_answer_")
-    ]
-    for key in keys_to_delete:
-        del st.session_state[key]
-
-
 def display_header():
     """Display the Cyber-styled header"""
     st.markdown(
@@ -187,21 +178,13 @@ def _render_step_card(title: str, subtitle: str, state: str) -> str:
 
 
 def enhanced_progress_display_component(
-    enable_indexing: bool, chat_mode: bool
+    enable_indexing: bool
 ) -> Tuple[Any, Any, List[Any], List[Dict[str, str]]]:
     """
     Render the progress panel required by handlers.handle_processing_workflow.
     """
 
-    if chat_mode:
-        workflow_steps = [
-            {"title": "INIT", "subtitle": "Boot agents"},
-            {"title": "PLAN", "subtitle": "Analyze intent"},
-            {"title": "SETUP", "subtitle": "Workspace"},
-            {"title": "DRAFT", "subtitle": "Generate plan"},
-            {"title": "CODE", "subtitle": "Implement"},
-        ]
-    elif not enable_indexing:
+    if not enable_indexing:
         workflow_steps = [
             {"title": "INIT", "subtitle": "Load systems"},
             {"title": "ANALYZE", "subtitle": "Parse paper"},
@@ -269,19 +252,9 @@ def update_step_indicator(
         )
 
 
-def chat_input_component(task_counter: int = 0) -> Optional[str]:
-    """Render modern chat input for guided mode"""
-    st.markdown("### 💬 Neural Link Interface")
 
-    user_input = st.chat_input(
-        placeholder="Input research directive or query...",
-        key=f"chat_input_{task_counter}",
-    )
-    return user_input
-
-
-def _save_uploaded_pdf(uploaded_file) -> Optional[str]:
-    """Persist uploaded PDF to a temp file and return its path."""
+def _save_uploaded_file_pdf(uploaded_file) -> Optional[str]:
+    """Persist uploaded file to a temp file and return its path."""
     try:
         file_bytes = uploaded_file.read()
         suffix = Path(uploaded_file.name).suffix or ".pdf"
@@ -298,47 +271,21 @@ def _save_uploaded_pdf(uploaded_file) -> Optional[str]:
 def input_method_selector(task_counter: int) -> Tuple[Optional[str], Optional[str]]:
     """Render the input method selection tabs with modern styling"""
 
-    tab1, tab2, tab3 = st.tabs(["📄 PDF UPLOAD", "🔗 URL LINK", "⚡ QUICK COMMAND"])
-
     input_source: Optional[str] = None
     input_type: Optional[str] = None
 
-    with tab1:
-        st.markdown('<div style="padding:1rem;"></div>', unsafe_allow_html=True)
-        uploaded_file = st.file_uploader(
-            "Upload Research Paper (PDF)",
-            type="pdf",
-            key=f"file_uploader_{task_counter}",
-        )
-        if uploaded_file:
-            saved_path = _save_uploaded_pdf(uploaded_file)
-            if saved_path:
-                st.session_state["uploaded_filename"] = uploaded_file.name
-                input_source = saved_path
-                input_type = "file"
-
-    with tab2:
-        st.markdown('<div style="padding:1rem;"></div>', unsafe_allow_html=True)
-        url = st.text_input(
-            "ArXiv / GitHub Resource URL",
-            placeholder="https://arxiv.org/abs/...",
-            key=f"url_input_{task_counter}",
-        )
-        if url:
-            input_source = url.strip()
-            input_type = "url"
-
-    with tab3:
-        st.markdown('<div style="padding:1rem;"></div>', unsafe_allow_html=True)
-        query = st.text_area(
-            "Code Specifications / Abstract",
-            placeholder="Describe the algorithm or system requirements...",
-            height=150,
-            key=f"text_input_{task_counter}",
-        )
-        if query:
-            input_source = query.strip()
-            input_type = "chat"
+    st.markdown('<div style="padding:1rem;"></div>', unsafe_allow_html=True)
+    uploaded_file = st.file_uploader(
+        "Upload Research Paper / Document (PDF)",
+        type=["pdf"],
+        key=f"file_uploader_{task_counter}",
+    )
+    if uploaded_file:
+        saved_path = _save_uploaded_file_pdf(uploaded_file)
+        if saved_path:
+            st.session_state["uploaded_filename"] = uploaded_file.name
+            input_source = saved_path
+            input_type = "file"
 
     return input_source, input_type
 
@@ -651,292 +598,6 @@ def render_log_viewer(max_lines: int = 50):
     """
 
     st.markdown(full_log_html, unsafe_allow_html=True)
-
-
-def reset_guided_workflow_state(preserve_initial: bool = False):
-    """
-    Reset guided requirement workflow state machine.
-    """
-    if preserve_initial:
-        initial_text = st.session_state.get(
-            "guided_initial_requirement",
-            st.session_state.get("initial_requirement", ""),
-        )
-    else:
-        initial_text = ""
-        st.session_state.initial_requirement = ""
-
-    st.session_state.guided_initial_requirement = initial_text
-    st.session_state.guided_edit_feedback = ""
-    st.session_state.requirement_analysis_step = "input"
-    st.session_state.generated_questions = []
-    st.session_state.user_answers = {}
-    st.session_state.detailed_requirements = ""
-    st.session_state.questions_generating = False
-    st.session_state.requirements_generating = False
-    st.session_state.requirements_confirmed = False
-    st.session_state.requirements_editing = False
-    st.session_state.edit_feedback = ""
-    st.session_state.confirmed_requirement_text = None
-    clear_guided_answer_inputs()
-
-
-def requirement_mode_selector() -> str:
-    """
-    Render the requirement workflow mode selector.
-    """
-    mode_labels = {"direct": "🚀 Direct Mode", "guided": "🧭 Guided Mode"}
-    current_mode = st.session_state.get("requirement_analysis_mode", "direct")
-
-    selection = st.radio(
-        "Requirement Intake Mode",
-        options=list(mode_labels.keys()),
-        index=0 if current_mode != "guided" else 1,
-        horizontal=True,
-        format_func=lambda key: mode_labels[key],
-        key="requirement_mode_selector_radio",
-    )
-
-    if selection != current_mode:
-        st.session_state.requirement_analysis_mode = selection
-        if selection == "direct":
-            reset_guided_workflow_state(preserve_initial=False)
-        else:
-            st.session_state.requirement_analysis_step = "input"
-
-    return selection
-
-
-def guided_requirement_workflow() -> Tuple[Optional[str], bool]:
-    """
-    Render the guided requirement analysis workflow.
-    """
-
-    st.markdown("### 🧭 Guided Requirement Workflow")
-
-    step = st.session_state.get("requirement_analysis_step", "input")
-    st.session_state.setdefault(
-        "guided_initial_requirement", st.session_state.get("initial_requirement", "")
-    )
-    st.session_state.setdefault(
-        "guided_edit_feedback", st.session_state.get("edit_feedback", "")
-    )
-
-    step_titles = {
-        "input": "Step 1 · Describe Requirements",
-        "questions": "Step 2 · Answer Guiding Questions",
-        "summary": "Step 3 · Review Requirement Document",
-        "editing": "Step 4 · Request Changes",
-    }
-    st.caption(
-        f"Current Stage: {step_titles.get(step, 'Step 1 · Describe Requirements')}"
-    )
-
-    confirmed_doc = st.session_state.get("confirmed_requirement_text")
-
-    if step == "input":
-        st.markdown("#### 1 · Describe your project")
-        st.text_area(
-            "Describe the product scope, tech stack, performance targets, and constraints:",
-            key="guided_initial_requirement",
-            height=180,
-        )
-        initial_text = st.session_state.get("guided_initial_requirement", "")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Generate guiding questions", type="primary"):
-                if not initial_text.strip():
-                    st.warning("Please enter your project requirements first.")
-                else:
-                    st.session_state.initial_requirement = initial_text.strip()
-                    st.session_state.questions_generating = True
-                    st.session_state.requirement_analysis_step = "questions"
-                    st.session_state.generated_questions = []
-                    st.session_state.user_answers = {}
-                    st.session_state.detailed_requirements = ""
-                    st.session_state.confirmed_requirement_text = None
-                    st.session_state.requirements_generating = False
-                    st.session_state.requirements_confirmed = False
-                    st.session_state.requirements_editing = False
-                    st.session_state.edit_feedback = ""
-                    clear_guided_answer_inputs()
-                    st.rerun()
-
-        with col2:
-            if st.button("Skip Q&A and use current spec", type="secondary"):
-                if not initial_text.strip():
-                    st.warning("Please enter your project requirements first.")
-                else:
-                    final_doc = initial_text.strip()
-                    st.session_state.initial_requirement = final_doc
-                    st.session_state.confirmed_requirement_text = final_doc
-                    st.session_state.requirements_confirmed = True
-                    st.success(
-                        "Current description locked as the requirement document. Implementation will proceed next."
-                    )
-
-    elif step == "questions":
-        st.markdown("#### 2 · Answer guiding questions")
-        if st.session_state.get("questions_generating"):
-            st.info("LLM is crafting guiding questions. Please wait...")
-
-        questions = st.session_state.get("generated_questions", [])
-        question_ids: List[str] = []
-
-        if not questions:
-            st.caption("Guiding questions will appear once generation is complete.")
-        else:
-            for idx, question in enumerate(questions):
-                if isinstance(question, dict):
-                    q_id = str(
-                        question.get("id")
-                        or question.get("question_id")
-                        or question.get("qid")
-                        or idx
-                    )
-                    q_text = question.get("question") or question.get("content") or ""
-                    category = question.get("category")
-                    importance = question.get("importance")
-                    hint = question.get("hint")
-                else:
-                    q_id = str(idx)
-                    q_text = str(question)
-                    category = importance = hint = None
-
-                question_ids.append(q_id)
-
-                st.markdown(
-                    f"**Q{idx + 1}. {q_text or 'Please answer this question'}**"
-                )
-                meta_parts = [part for part in [category, importance] if part]
-                if meta_parts:
-                    st.caption(" / ".join(meta_parts))
-                if hint:
-                    st.caption(f"Hint: {hint}")
-
-                answer_key = f"guided_answer_{idx}"
-                if answer_key not in st.session_state:
-                    default_answer = st.session_state.user_answers.get(q_id, "")
-                    st.session_state[answer_key] = default_answer
-
-                st.text_area("Your answer", key=answer_key, height=100)
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if st.button(
-                "Generate requirement document", type="primary", disabled=not questions
-            ):
-                answers_payload = {}
-                for idx, q_id in enumerate(question_ids):
-                    answer_value = st.session_state.get(
-                        f"guided_answer_{idx}", ""
-                    ).strip()
-                    if answer_value:
-                        answers_payload[q_id] = answer_value
-
-                st.session_state.user_answers = answers_payload
-                st.session_state.requirements_generating = True
-                st.session_state.requirement_analysis_step = "summary"
-                st.session_state.detailed_requirements = ""
-                st.session_state.confirmed_requirement_text = None
-                st.session_state.requirements_confirmed = False
-                st.rerun()
-
-        with col2:
-            if st.button(
-                "Generate without answers", type="secondary", disabled=not questions
-            ):
-                st.session_state.user_answers = {}
-                st.session_state.requirements_generating = True
-                st.session_state.requirement_analysis_step = "summary"
-                st.session_state.detailed_requirements = ""
-                st.session_state.confirmed_requirement_text = None
-                st.session_state.requirements_confirmed = False
-                st.rerun()
-
-        with col3:
-            if st.button("Back to Step 1"):
-                reset_guided_workflow_state(preserve_initial=True)
-                st.rerun()
-
-    elif step == "summary":
-        st.markdown("#### 3 · AI-generated requirement document")
-        if st.session_state.get("requirements_generating"):
-            st.info("Generating requirement document. Please wait...")
-
-        summary = (st.session_state.get("detailed_requirements") or "").strip()
-
-        if summary:
-            st.markdown(summary)
-            st.download_button(
-                "Download requirement document",
-                summary,
-                file_name="deepcode_requirements.md",
-                mime="text/markdown",
-                use_container_width=True,
-            )
-        else:
-            st.caption("Waiting for requirement document to be generated...")
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if st.button(
-                "Confirm and start implementation ✅",
-                type="primary",
-                disabled=not summary,
-            ):
-                final_doc = summary or st.session_state.get("initial_requirement", "")
-                if final_doc.strip():
-                    st.session_state.confirmed_requirement_text = final_doc.strip()
-                    st.session_state.requirements_confirmed = True
-                    st.success(
-                        "Requirement document confirmed. Implementation pipeline will start next."
-                    )
-                else:
-                    st.warning("No requirement document available yet.")
-
-        with col2:
-            if st.button("Request edits", type="secondary", disabled=not summary):
-                st.session_state.requirement_analysis_step = "editing"
-                st.session_state.guided_edit_feedback = ""
-
-        with col3:
-            if st.button("Restart Q&A", type="secondary"):
-                reset_guided_workflow_state(preserve_initial=True)
-                st.rerun()
-
-    elif step == "editing":
-        st.markdown("#### 4 · Modify requirement document")
-        st.text_area(
-            "Describe the changes or clarifications you need:",
-            key="guided_edit_feedback",
-            height=160,
-        )
-        feedback_value = st.session_state.get("guided_edit_feedback", "")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Submit change request", type="primary"):
-                if not feedback_value.strip():
-                    st.warning("Please describe the requested changes.")
-                else:
-                    st.session_state.edit_feedback = feedback_value.strip()
-                    st.session_state.requirements_editing = True
-                    st.info("Updating requirement document based on your feedback...")
-
-        with col2:
-            if st.button("Back to requirement document"):
-                st.session_state.requirement_analysis_step = "summary"
-                st.session_state.guided_edit_feedback = ""
-
-        if st.session_state.get("requirements_editing"):
-            st.info("Requirement document is updating...")
-
-    if confirmed_doc:
-        st.success("Requirement document locked. You can start implementation anytime.")
-
-    return (confirmed_doc if confirmed_doc else None, bool(confirmed_doc))
 
 
 def sidebar_control_panel():
