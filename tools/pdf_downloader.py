@@ -26,6 +26,8 @@ from urllib.parse import urlparse, unquote
 from datetime import datetime
 
 from mcp.server import FastMCP
+import zipfile
+import asyncio
 
 # Docling imports for document conversion
 try:
@@ -84,8 +86,144 @@ def format_warning_message(action: str, warning: str) -> str:
     return f"⚠️ {action}\n   Warning: {warning}"
 
 
+def _get_mineru_api_key() -> Optional[str]:
+    secrets_path = "/home/user02/deepcode/deepcode/mcp_agent.secrets.yaml"
+    key = None
+    try:
+        import yaml  # type: ignore
+        if os.path.exists(secrets_path):
+            with open(secrets_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+                mineru_cfg = data.get("mineru") or {}
+                key = mineru_cfg.get("api_key")
+    except Exception:
+        # 轻量级回退解析: 从YAML文本中正则提取api_key
+        try:
+            if os.path.exists(secrets_path):
+                with open(secrets_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                m = re.search(r"mineru:\s*\n\s*api_key:\s*\"([^\"]+)\"", content)
+                if m:
+                    key = m.group(1)
+        except Exception:
+            pass
+    if not key:
+        key = os.getenv("MINERU_API_KEY", "").strip() or None
+    return key
+
+
+async def _mineru_convert_pdf(
+    file_path: str,
+    language: str = "ch",
+    enable_ocr: bool = True,
+    poll_interval: int = 5,
+    max_retries: int = 180,
+) -> Dict[str, Any]:
+    api_key = _get_mineru_api_key()
+    if not api_key:
+        return {"success": False, "error": "MinerU API key not found"}
+
+    api_base = os.getenv("MINERU_API_BASE", "https://mineru.net")
+
+    if not os.path.exists(file_path):
+        return {"success": False, "error": f"Input file not found: {file_path}"}
+
+    start_time = datetime.now()
+
+    headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json", "Content-Type": "application/json"}
+
+    filename = os.path.basename(file_path)
+    data_id = os.path.splitext(filename)[0]
+    payload = {"files": [{"name": filename, "data_id": data_id}], "model_version": "vlm"}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{api_base}/api/v4/file-urls/batch", json=payload, headers=headers) as resp:
+                resp.raise_for_status()
+                j = await resp.json()
+        if "data" not in j or "batch_id" not in j["data"] or "file_urls" not in j["data"]:
+            return {"success": False, "error": f"Unexpected response: {j}"}
+
+        batch_id = j["data"]["batch_id"]
+        upload_urls = j["data"]["file_urls"]
+        if not upload_urls:
+            return {"success": False, "error": "No upload URL returned"}
+
+        async with aiohttp.ClientSession() as session:
+            with open(file_path, "rb") as f:
+                async with session.put(
+                    upload_urls[0],
+                    data=f,
+                    skip_auto_headers={"Content-Type"},
+                ) as put_resp:
+                    if put_resp.status != 200:
+                        text = await put_resp.text()
+                        return {"success": False, "error": f"Upload failed: {put_resp.status} {text}"}
+
+        extract_dir = os.path.dirname(file_path) or "."
+
+        for _ in range(max_retries):
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{api_base}/api/v4/extract-results/batch/{batch_id}", headers=headers) as sresp:
+                    sresp.raise_for_status()
+                    status_info = await sresp.json()
+            if "data" in status_info and "extract_result" in status_info["data"]:
+                results = status_info["data"]["extract_result"]
+                for r in results:
+                    if r.get("state") == "done" and r.get("full_zip_url"):
+                        zip_url = r["full_zip_url"]
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(zip_url, headers=headers) as z:
+                                z.raise_for_status()
+                                zbytes = await z.read()
+                        zip_name = os.path.basename(zip_url)
+                        zip_path = os.path.join(extract_dir, zip_name)
+                        with open(zip_path, "wb") as f:
+                            f.write(zbytes)
+                        with zipfile.ZipFile(zip_path, "r") as zf:
+                            zf.extractall(extract_dir)
+                        try:
+                            os.remove(zip_path)
+                        except Exception:
+                            pass
+
+                        md_file = None
+                        images_dir = None
+                        for root, _, files in os.walk(extract_dir):
+                            for fn in files:
+                                if fn.lower().endswith(".md") and not md_file:
+                                    md_file = os.path.join(root, fn)
+                            if os.path.isdir(os.path.join(root, "images")) and not images_dir:
+                                images_dir = os.path.join(root, "images")
+
+                        target_md = os.path.join(extract_dir, f"{data_id}.md")
+                        if md_file and os.path.abspath(md_file) != os.path.abspath(target_md):
+                            try:
+                                shutil.copyfile(md_file, target_md)
+                                md_file = target_md
+                            except Exception:
+                                pass
+
+                        duration = (datetime.now() - start_time).total_seconds()
+                        return {
+                            "success": True,
+                            "batch_id": batch_id,
+                            "output_dir": extract_dir,
+                            "markdown_file": md_file,
+                            "images_dir": images_dir,
+                            "duration": duration,
+                        }
+            await asyncio.sleep(poll_interval)
+
+        return {"success": False, "error": "Timeout waiting for MinerU results"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 async def perform_document_conversion(
-    file_path: str, extract_images: bool = True
+    file_path: str,
+    extract_images: bool = True,
+    desired_md_path: Optional[str] = None,
 ) -> Optional[str]:
     """
     执行文档转换的共用逻辑
@@ -101,69 +239,60 @@ async def perform_document_conversion(
         return None
 
     conversion_msg = ""
+    is_pdf = False
+    try:
+        with open(file_path, "rb") as f:
+            header = f.read(8)
+            is_pdf = header.startswith(b"%PDF")
+    except Exception:
+        is_pdf = file_path.lower().endswith(".pdf")
 
-    # 首先尝试使用简单的PDF转换器（对于PDF文件）
-    # 检查文件是否实际为PDF（无论扩展名如何）
-    is_pdf_file = False
-    if PYPDF2_AVAILABLE:
-        try:
-            with open(file_path, "rb") as f:
-                header = f.read(8)
-                is_pdf_file = header.startswith(b"%PDF")
-        except Exception:
-            is_pdf_file = file_path.lower().endswith(".pdf")
-
-    if is_pdf_file and PYPDF2_AVAILABLE:
-        try:
-            simple_converter = SimplePdfConverter()
-            conversion_result = simple_converter.convert_pdf_to_markdown(file_path)
-            if conversion_result["success"]:
-                conversion_msg = "\n   [INFO] PDF converted to Markdown (PyPDF2)"
-                conversion_msg += (
-                    f"\n   Markdown file: {conversion_result['output_file']}"
-                )
-                conversion_msg += (
-                    f"\n   Conversion time: {conversion_result['duration']:.2f} seconds"
-                )
-                conversion_msg += (
-                    f"\n   Pages extracted: {conversion_result['pages_extracted']}"
-                )
-
+    if is_pdf:
+        auto_md_path = os.path.splitext(file_path)[0] + ".md"
+        if not desired_md_path:
+            desired_md_path = auto_md_path
+        mineru_result = await _mineru_convert_pdf(file_path)
+        if mineru_result.get("success"):
+            conversion_msg = "\n   [INFO] PDF parsed via MinerU"
+            if mineru_result.get("markdown_file"):
+                conversion_msg += f"\n   Markdown file: {mineru_result['markdown_file']}"
+            if mineru_result.get("images_dir"):
+                conversion_msg += f"\n   Images dir: {mineru_result['images_dir']}"
+            conversion_msg += f"\n   Duration: {mineru_result['duration']:.2f} seconds"
+            if desired_md_path and mineru_result.get("markdown_file"):
+                try:
+                    os.makedirs(os.path.dirname(desired_md_path) or ".", exist_ok=True)
+                    if os.path.abspath(mineru_result["markdown_file"]) != os.path.abspath(desired_md_path):
+                        shutil.copyfile(mineru_result["markdown_file"], desired_md_path)
+                    conversion_msg += f"\n   Saved MD: {desired_md_path}"
+                except Exception as e:
+                    conversion_msg += f"\n   [WARNING] Save MD failed: {str(e)}"
+        else:
+            if PYPDF2_AVAILABLE:
+                try:
+                    simple_converter = SimplePdfConverter()
+                    conversion_result = simple_converter.convert_pdf_to_markdown(file_path)
+                    if conversion_result["success"]:
+                        conversion_msg = "\n   [INFO] Fallback: PDF converted to Markdown (PyPDF2)"
+                        conversion_msg += f"\n   Markdown file: {conversion_result['output_file']}"
+                        conversion_msg += f"\n   Conversion time: {conversion_result['duration']:.2f} seconds"
+                        conversion_msg += f"\n   Pages extracted: {conversion_result['pages_extracted']}"
+                        if desired_md_path:
+                            try:
+                                os.makedirs(os.path.dirname(desired_md_path) or ".", exist_ok=True)
+                                if os.path.abspath(conversion_result["output_file"]) != os.path.abspath(desired_md_path):
+                                    shutil.copyfile(conversion_result["output_file"], desired_md_path)
+                                conversion_msg += f"\n   Saved MD: {desired_md_path}"
+                            except Exception as e:
+                                conversion_msg += f"\n   [WARNING] Save MD failed: {str(e)}"
+                    else:
+                        conversion_msg = f"\n   [WARNING] MinerU failed: {mineru_result.get('error')}"
+                except Exception as conv_error:
+                    conversion_msg = f"\n   [WARNING] MinerU failed: {mineru_result.get('error')}"
             else:
-                conversion_msg = f"\n   [WARNING] PDF conversion failed: {conversion_result['error']}"
-        except Exception as conv_error:
-            conversion_msg = f"\n   [WARNING] PDF conversion error: {str(conv_error)}"
+                conversion_msg = f"\n   [WARNING] MinerU failed: {mineru_result.get('error')}"
 
-    # 如果简单转换失败，尝试使用docling（支持图片提取）
-    # if not conversion_success and DOCLING_AVAILABLE:
-    #     try:
-    #         converter = DoclingConverter()
-    #         if converter.is_supported_format(file_path):
-    #             conversion_result = converter.convert_to_markdown(
-    #                 file_path, extract_images=extract_images
-    #             )
-    #             if conversion_result["success"]:
-    #                 conversion_msg = (
-    #                     "\n   [INFO] Document converted to Markdown (docling)"
-    #                 )
-    #                 conversion_msg += (
-    #                     f"\n   Markdown file: {conversion_result['output_file']}"
-    #                 )
-    #                 conversion_msg += f"\n   Conversion time: {conversion_result['duration']:.2f} seconds"
-    #                 if conversion_result.get("images_extracted", 0) > 0:
-    #                     conversion_msg += f"\n   Images extracted: {conversion_result['images_extracted']}"
-    #                     images_dir = os.path.join(
-    #                         os.path.dirname(conversion_result["output_file"]), "images"
-    #                     )
-    #                     conversion_msg += f"\n   Images saved to: {images_dir}"
-    #             else:
-    #                 conversion_msg = f"\n   [WARNING] Docling conversion failed: {conversion_result['error']}"
-    #     except Exception as conv_error:
-    #         conversion_msg = (
-    #             f"\n   [WARNING] Docling conversion error: {str(conv_error)}"
-    #         )
-
-    return conversion_msg if conversion_msg else None
+    return conversion_msg or None
 
 
 def format_file_operation_result(
@@ -1097,44 +1226,43 @@ async def download_file_to(
     Returns:
         Status message about the download operation
     """
-    # 确定文件名
-
     url = URLExtractor.extract_urls(url)[0]
+    inferred = URLExtractor.infer_filename_from_url(url)
+    inferred_ext = os.path.splitext(inferred)[1]
 
-    if not filename:
-        filename = URLExtractor.infer_filename_from_url(url)
+    if destination and destination.startswith("~"):
+        destination = os.path.expanduser(destination)
 
-    if not filename:
-        filename = URLExtractor.infer_filename_from_url(url)
-    else:
-        name_source, extension_source = os.path.splitext(
-            os.path.basename(URLExtractor.infer_filename_from_url(url))
-        )
-        name_destination, extension_destination = os.path.splitext(
-            os.path.basename(filename)
-        )
-        if extension_source:
-            filename = name_destination + extension_source
-        else:
-            filename = name_destination + extension_destination
-
-    # 确定完整路径
+    dest_dir = None
+    explicit_file_path = None
     if destination:
-        # 展开用户目录
-        if destination.startswith("~"):
-            destination = os.path.expanduser(destination)
-
-        # 检查是否是完整文件路径
-        if os.path.splitext(destination)[1]:  # 有扩展名
-            target_path = destination
-        else:  # 是目录
-            target_path = os.path.join(destination, filename)
+        if os.path.splitext(destination)[1]:
+            explicit_file_path = destination
+            dest_dir = os.path.dirname(destination) or "."
+        else:
+            dest_dir = destination
     else:
-        target_path = filename
+        dest_dir = "."
 
-    # 确保使用相对路径（如果不是绝对路径）
-    if not os.path.isabs(target_path):
-        target_path = os.path.normpath(target_path)
+    desired_md_path = None
+    if filename:
+        name_dest, ext_dest = os.path.splitext(os.path.basename(filename))
+    else:
+        name_dest, ext_dest = os.path.splitext(os.path.basename(inferred))
+
+    if ext_dest.lower() == ".md":
+        desired_md_path = os.path.join(dest_dir, name_dest + ".md")
+        pdf_ext = inferred_ext if inferred_ext else ".pdf"
+        download_name = name_dest + "_origin" + pdf_ext
+        target_path = os.path.join(dest_dir, download_name)
+    elif explicit_file_path:
+        target_path = explicit_file_path
+    else:
+        if filename:
+            final_name = name_dest + (inferred_ext if inferred_ext else ext_dest)
+        else:
+            final_name = inferred
+        target_path = os.path.join(dest_dir, final_name)
 
     # 检查文件是否已存在
     if os.path.exists(target_path):
@@ -1170,7 +1298,7 @@ async def download_file_to(
     conversion_msg = None
     if result["success"]:
         conversion_msg = await perform_document_conversion(
-            target_path, extract_images=True
+            target_path, extract_images=True, desired_md_path=desired_md_path
         )
 
         # 添加下载信息前缀
@@ -1182,6 +1310,8 @@ async def download_file_to(
         info_msg += f"   Duration: {result['duration']:.2f} seconds\n"
         info_msg += f"   Speed: {speed_mb:.2f} MB/s\n"
         info_msg += f"   Type: {result['content_type']}"
+        if desired_md_path:
+            info_msg += f"\n   Markdown output: {desired_md_path}"
 
         if conversion_msg:
             info_msg += conversion_msg
@@ -1231,17 +1361,24 @@ async def move_file_to(
             filename = name_destination + extension_destination
 
     # 确定完整路径
+    desired_md_path = None
     if destination:
-        # 展开用户目录
         if destination.startswith("~"):
             destination = os.path.expanduser(destination)
 
-        # 检查是否是完整文件路径
-        if os.path.splitext(destination)[1]:  # 有扩展名
-            target_path = destination
-        else:  # 是目录
-            target_path = os.path.join(destination, filename)
-
+        # 如果用户传入的destination是.md，表示希望最终得到该md
+        if destination.lower().endswith(".md"):
+            desired_md_path = destination
+            # 将复制目标设为同目录下的 "<name>_origin.pdf"（或原扩展名）
+            dest_dir = os.path.dirname(destination) or "."
+            name, _ = os.path.splitext(os.path.basename(destination))
+            src_ext = os.path.splitext(source)[1] or ".pdf"
+            target_path = os.path.join(dest_dir, name + "_origin" + src_ext)
+        else:
+            if os.path.splitext(destination)[1]:
+                target_path = destination
+            else:
+                target_path = os.path.join(destination, filename)
     else:
         target_path = filename
 
@@ -1268,7 +1405,7 @@ async def move_file_to(
     conversion_msg = None
     if result["success"]:
         conversion_msg = await perform_document_conversion(
-            target_path, extract_images=True
+            target_path, extract_images=True, desired_md_path=desired_md_path
         )
 
         # 添加复制信息前缀
@@ -1394,12 +1531,10 @@ async def move_file_to(
 if __name__ == "__main__":
     print("📄 Smart PDF Downloader MCP Tool")
     print("📝 Starting server with FastMCP...")
-
-    if DOCLING_AVAILABLE:
-        print("✅ Document conversion to Markdown is ENABLED (docling available)")
+    if _get_mineru_api_key():
+        print("✅ MinerU PDF parsing is ENABLED")
     else:
-        print("❌ Document conversion to Markdown is DISABLED (docling not available)")
-        print("   Install docling to enable: pip install docling")
+        print("❌ MinerU PDF parsing is DISABLED (API key missing)")
 
     print("\nAvailable tools:")
     print(
@@ -1408,11 +1543,7 @@ if __name__ == "__main__":
     print("  • parse_download_urls - Extract URLs, local paths and destination paths")
     print("  • download_file_to - Download a specific file with options")
     print("  • move_file_to - Move a specific local file with options")
-    print("  • convert_document_to_markdown - Convert documents to Markdown format")
-
-    if DOCLING_AVAILABLE:
-        print("\nSupported formats: PDF, DOCX, PPTX, HTML, TXT, MD")
-        print("Features: Image extraction, Layout preservation, Automatic conversion")
+    print("  • (auto) PDF→Markdown via MinerU API when downloading or copying PDFs")
 
     print("")
 

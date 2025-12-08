@@ -575,10 +575,18 @@ Requirements:
                 openai_config = self.api_config.get("openai", {})
                 base_url = openai_config.get("base_url")
 
+                import os as _os
+                ark_key_env = _os.environ.get("ARK_API_KEY")
+                if not ark_key_env:
+                    try:
+                        _os.environ["ARK_API_KEY"] = openai_key
+                    except Exception:
+                        pass
+                api_key_for_client = _os.environ.get("ARK_API_KEY") or openai_key
                 if base_url:
-                    client = AsyncOpenAI(api_key=openai_key, base_url=base_url)
+                    client = AsyncOpenAI(api_key=api_key_for_client, base_url=base_url)
                 else:
-                    client = AsyncOpenAI(api_key=openai_key)
+                    client = AsyncOpenAI(api_key=api_key_for_client)
 
                 model_name = self.default_models.get("openai", "o3-mini")
 

@@ -7,7 +7,10 @@ and reduce code duplication across the project.
 
 import os
 import yaml
-from typing import Any, Type, Dict, Tuple
+from typing import Any, Type, Dict, Tuple, List, Optional
+import json
+import base64
+import requests
 
 # Import LLM classes
 from mcp_agent.workflows.llm.augmented_llm_anthropic import AnthropicAugmentedLLM
@@ -213,6 +216,19 @@ def get_document_segmentation_config(
         return {"enabled": True, "size_threshold_chars": 50000}
 
 
+def ensure_ark_api_key_env(secrets_path: str = "mcp_agent.secrets.yaml") -> None:
+    try:
+        if os.path.exists(secrets_path):
+            with open(secrets_path, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            openai_cfg = cfg.get("openai") or {}
+            key = str(openai_cfg.get("api_key", ""))
+            if key:
+                os.environ["ARK_API_KEY"] = key
+    except Exception:
+        pass
+
+
 def should_use_document_segmentation(
     document_content: str, config_path: str = "mcp_agent.config.yaml"
 ) -> Tuple[bool, str]:
@@ -320,3 +336,614 @@ def get_adaptive_prompts(use_segmentation: bool) -> Dict[str, str]:
             "algorithm_analysis": PAPER_ALGORITHM_ANALYSIS_PROMPT_TRADITIONAL,
             "code_planning": CODE_PLANNING_PROMPT_TRADITIONAL,
         }
+
+
+def _find_paper_markdown(paper_dir: str) -> Tuple[str, str]:
+    md_path = ""
+    md_content = ""
+    try:
+        for filename in os.listdir(paper_dir):
+            if filename.endswith(".md"):
+                md_path = os.path.join(paper_dir, filename)
+                with open(md_path, "r", encoding="utf-8") as f:
+                    md_content = f.read()
+                break
+    except Exception:
+        pass
+    return md_path, md_content
+
+
+def _extract_md_images(md_content: str, paper_dir: str, limit: int = 20) -> list:
+    import re
+    paths = []
+    md_pattern = r"!\[[^\]]*\]\(([^)]+)\)"
+    html_pattern = r"<img[^>]*src=[\"']([^\"']+)[\"'][^>]*>"
+    candidates = []
+    candidates.extend(re.findall(md_pattern, md_content))
+    candidates.extend(re.findall(html_pattern, md_content))
+    for p in candidates:
+        p = p.strip()
+        if not p:
+            continue
+        if p.startswith("http://") or p.startswith("https://"):
+            continue
+        if p.startswith("data:image"):
+            continue
+        if os.path.isabs(p):
+            abs_path = p
+        else:
+            abs_path = os.path.join(paper_dir, p)
+        if os.path.exists(abs_path):
+            paths.append(abs_path)
+        if len(paths) >= limit:
+            break
+    return paths
+
+
+def _encode_file_to_data_url(file_path: str) -> str:
+    ext = os.path.splitext(file_path)[1].lower().replace(".", "")
+    if ext == "jpg":
+        ext = "jpeg"
+    with open(file_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("utf-8")
+    return f"data:image/{ext};base64,{b64}"
+
+
+def collect_paper_images_as_data_urls(paper_dir: str, max_images: int = 20) -> Tuple[str, list]:
+    md_path, md_content = _find_paper_markdown(paper_dir)
+    if not md_path or not md_content:
+        return "", []
+    image_files = _extract_md_images(md_content, os.path.dirname(md_path), max_images)
+    data_urls = []
+    for p in image_files:
+        try:
+            data_urls.append(_encode_file_to_data_url(p))
+        except Exception:
+            continue
+    return md_content, data_urls
+
+
+def collect_paper_image_file_paths(
+    paper_dir: str, max_images: int = 20
+) -> Tuple[str, List[str]]:
+    md_path, md_content = _find_paper_markdown(paper_dir)
+    if not md_path or not md_content:
+        images_dir = os.path.join(paper_dir, "images")
+        files: List[str] = []
+        if os.path.isdir(images_dir):
+            allowed_ext = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+            files = [
+                os.path.join(images_dir, f)
+                for f in os.listdir(images_dir)
+                if os.path.splitext(f)[1].lower() in allowed_ext
+            ]
+        else:
+            allowed_ext = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+            files = [
+                os.path.join(paper_dir, f)
+                for f in os.listdir(paper_dir)
+                if os.path.splitext(f)[1].lower() in allowed_ext
+            ]
+        files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        return "", files[:max_images]
+    images_from_md = _extract_md_images(md_content, os.path.dirname(md_path), max_images)
+    image_files = list(images_from_md)
+    if len(image_files) < max_images:
+        allowed_ext = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+        same_dir_files = [
+            os.path.join(os.path.dirname(md_path), f)
+            for f in os.listdir(os.path.dirname(md_path))
+            if os.path.splitext(f)[1].lower() in allowed_ext
+        ]
+        for p in same_dir_files:
+            if p not in image_files:
+                image_files.append(p)
+                if len(image_files) >= max_images:
+                    break
+    if len(image_files) < max_images:
+        images_dir = os.path.join(paper_dir, "images")
+        if os.path.isdir(images_dir):
+            allowed_ext = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+            extra = [
+                os.path.join(images_dir, f)
+                for f in os.listdir(images_dir)
+                if os.path.splitext(f)[1].lower() in allowed_ext
+            ]
+            for p in extra:
+                if p not in image_files:
+                    image_files.append(p)
+                    if len(image_files) >= max_images:
+                        break
+    return md_content, image_files
+
+
+def create_openai_client_from_secrets(config_path: str = "mcp_agent.secrets.yaml"):
+    try:
+        from openai import OpenAI
+    except Exception:
+        return None
+    try:
+        if not os.path.exists(config_path):
+            return None
+        with open(config_path, "r", encoding="utf-8") as f:
+            secrets = yaml.safe_load(f)
+        base_url = secrets.get("openai", {}).get("base_url")
+        ensure_ark_api_key_env(config_path)
+        api_key_env = os.environ.get("ARK_API_KEY")
+        if not api_key_env or not base_url:
+            return None
+        client = OpenAI(api_key=os.environ.get("ARK_API_KEY"), base_url=base_url)
+        return client
+    except Exception:
+        return None
+
+
+def create_ark_client_from_secrets(config_path: str = "mcp_agent.secrets.yaml"):
+    try:
+        from volcenginesdkarkruntime import AsyncArk
+    except Exception:
+        return None
+    try:
+        if not os.path.exists(config_path):
+            return None
+        with open(config_path, "r", encoding="utf-8") as f:
+            secrets = yaml.safe_load(f)
+        base_url = secrets.get("openai", {}).get("base_url")
+        ensure_ark_api_key_env(config_path)
+        api_key_env = os.environ.get("ARK_API_KEY")
+        if not api_key_env or not base_url:
+            return None
+        client = AsyncArk(base_url=base_url, api_key=os.environ.get("ARK_API_KEY"))
+        return client
+    except Exception:
+        return None
+
+
+def _http_responses_create(
+    base_url: str,
+    api_key: str,
+    model_name: str,
+    input_blocks: List[Dict[str, Any]],
+    max_tokens: int,
+    reasoning: Optional[Dict[str, Any]] = None,
+) -> str:
+    url = base_url.rstrip("/") + "/responses"
+    api_key_env = os.environ.get("ARK_API_KEY") or api_key
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key_env}",
+    }
+    payload = {
+        "model": model_name,
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": input_blocks,
+            }
+        ],
+        "max_tokens": max_tokens,
+    }
+    if reasoning:
+        payload["reasoning"] = reasoning
+    resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=120)
+    if resp.status_code >= 200 and resp.status_code < 300:
+        data = resp.json()
+        if "output_text" in data and isinstance(data["output_text"], str):
+            return data["output_text"]
+        if "output" in data and isinstance(data["output"], list):
+            parts = []
+            for item in data["output"]:
+                if "content" in item and isinstance(item["content"], list):
+                    for c in item["content"]:
+                        if c.get("type") == "output_text":
+                            parts.append(c.get("text", ""))
+            return "\n".join(parts).strip()
+        return json.dumps(data, ensure_ascii=False)
+    return ""
+
+def _http_upload_file(base_url: str, api_key: str, file_path: str, purpose: str = "user_data") -> Optional[str]:
+    url = base_url.rstrip("/") + "/files"
+    api_key_env = os.environ.get("ARK_API_KEY") or api_key
+    headers = {
+        "Authorization": f"Bearer {api_key_env}",
+    }
+    try:
+        with open(file_path, "rb") as f:
+            files = {
+                "file": (os.path.basename(file_path), f),
+            }
+            data = {"purpose": purpose}
+            resp = requests.post(url, headers=headers, files=files, data=data, timeout=120)
+        if resp.status_code >= 200 and resp.status_code < 300:
+            j = resp.json()
+            fid = j.get("id") or j.get("file_id")
+            return fid
+    except Exception:
+        pass
+    return None
+
+def _http_chat_completions(
+    base_url: str,
+    api_key: str,
+    model_name: str,
+    messages: List[Dict[str, Any]],
+    max_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
+) -> str:
+    url = base_url.rstrip("/") + "/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {os.environ.get('ARK_API_KEY') or api_key}",
+    }
+    payload: Dict[str, Any] = {
+        "model": model_name,
+        "messages": messages,
+    }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    if temperature is not None:
+        payload["temperature"] = temperature
+    resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=120)
+    if resp.status_code >= 200 and resp.status_code < 300:
+        data = resp.json()
+        try:
+            choices = data.get("choices") or []
+            if choices:
+                msg = choices[0].get("message") or {}
+                content = msg.get("content")
+                if isinstance(content, list):
+                    parts = []
+                    for c in content:
+                        if c.get("type") in ("text", "output_text"):
+                            parts.append(c.get("text", ""))
+                    return "\n".join(parts).strip()
+                if isinstance(content, str):
+                    return content
+        except Exception:
+            pass
+        return json.dumps(data, ensure_ascii=False)
+    return ""
+
+
+async def generate_multimodal_plan(
+    paper_dir: str,
+    task_prompt: str,
+    model_name: str,
+    max_tokens: int = 12000,
+    temperature: float = 0.2,
+    config_path: str = "mcp_agent.config.yaml",
+) -> str:
+    ensure_ark_api_key_env("mcp_agent.secrets.yaml")
+    md_text, file_paths = collect_paper_image_file_paths(paper_dir)
+    if not md_text and not file_paths:
+        return ""
+
+    reasoning = None
+    try:
+        if os.path.exists("mcp_agent.config.yaml"):
+            with open("mcp_agent.config.yaml", "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f)
+                openai_cfg = cfg.get("openai") or {}
+                eff = openai_cfg.get("reasoning_effort")
+                if isinstance(eff, str) and eff:
+                    reasoning = {"effort": eff}
+    except Exception:
+        reasoning = None
+
+    base_url = None
+    try:
+        with open("mcp_agent.secrets.yaml", "r", encoding="utf-8") as f:
+            secrets = yaml.safe_load(f)
+        base_url = secrets.get("openai", {}).get("base_url")
+        # Respect configured default model if provided
+        if os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            openai_cfg = cfg.get("openai") or {}
+            configured_model = openai_cfg.get("default_model")
+            if isinstance(configured_model, str) and configured_model:
+                model_name = configured_model
+    except Exception:
+        base_url = None
+
+    api_key_env = os.environ.get("ARK_API_KEY")
+    if api_key_env and base_url:
+        file_ids: List[str] = []
+        for p in file_paths:
+            fid = _http_upload_file(base_url=base_url, api_key=api_key_env, file_path=p)
+            if fid:
+                file_ids.append(fid)
+
+        if file_ids:
+            blocks = []
+            for fid in file_ids:
+                blocks.append({"type": "input_image", "file_id": fid})
+            if md_text:
+                blocks.append({"type": "input_text", "text": task_prompt + "\n\n" + md_text})
+            else:
+                blocks.append({"type": "input_text", "text": task_prompt + "\n\n[Images only; no markdown text detected]"})
+            out = _http_responses_create(
+                base_url=base_url,
+                api_key=api_key_env,
+                model_name=model_name,
+                input_blocks=blocks,
+                max_tokens=max_tokens,
+                reasoning=reasoning,
+            )
+            if out:
+                return out
+
+        try:
+            msgs: List[Dict[str, Any]] = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": task_prompt + "\n\n" + md_text},
+                    ],
+                }
+            ]
+            for p in file_paths:
+                try:
+                    with open(p, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode("ascii")
+                    ext = os.path.splitext(p)[1].lower().strip(".")
+                    if ext == "jpg":
+                        ext = "jpeg"
+                    data_url = f"data:image/{ext};base64,{b64}"
+                    msgs[0]["content"].insert(0, {"type": "image_url", "image_url": {"url": data_url, "detail": "high"}})
+                except Exception:
+                    pass
+            out2 = _http_chat_completions(
+                base_url=base_url,
+                api_key=api_key_env,
+                model_name=model_name,
+                messages=msgs,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            if out2:
+                return out2
+        except Exception:
+            pass
+
+        # Final attempt via HTTP /responses using base64 data URLs directly
+        try:
+            blocks_b64: List[Dict[str, Any]] = []
+            for p in file_paths:
+                try:
+                    with open(p, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode("ascii")
+                    ext = os.path.splitext(p)[1].lower().strip(".")
+                    if ext == "jpg":
+                        ext = "jpeg"
+                    data_url = f"data:image/{ext};base64,{b64}"
+                    blocks_b64.append({"type": "input_image", "image_url": data_url})
+                except Exception:
+                    blocks_b64.append({"type": "input_text", "text": f"[image missing: {p}]"})
+            if md_text:
+                blocks_b64.append({"type": "input_text", "text": task_prompt + "\n\n" + md_text})
+            else:
+                blocks_b64.append({"type": "input_text", "text": task_prompt + "\n\n[Images only; no markdown text detected]"})
+            out3 = _http_responses_create(
+                base_url=base_url,
+                api_key=api_key_env,
+                model_name=model_name,
+                input_blocks=blocks_b64,
+                max_tokens=max_tokens,
+                reasoning=reasoning,
+            )
+            if out3:
+                return out3
+        except Exception:
+            pass
+
+    ark_client = create_ark_client_from_secrets()
+    if ark_client is not None and file_paths:
+        try:
+            input_blocks_file = []
+            for p in file_paths:
+                try:
+                    with open(p, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode("ascii")
+                    ext = os.path.splitext(p)[1].lower()
+                    mime = {
+                        ".png": "image/png",
+                        ".jpg": "image/jpeg",
+                        ".jpeg": "image/jpeg",
+                        ".gif": "image/gif",
+                        ".webp": "image/webp",
+                        ".svg": "image/svg+xml",
+                    }.get(ext, "image/png")
+                    data_url = f"data:{mime};base64,{b64}"
+                    input_blocks_file.append({"type": "input_image", "image_url": data_url})
+                except Exception:
+                    input_blocks_file.append({"type": "input_text", "text": f"[image] {p}"})
+            if md_text:
+                input_blocks_file.append({"type": "input_text", "text": task_prompt + "\n\n" + md_text})
+            else:
+                input_blocks_file.append({"type": "input_text", "text": task_prompt + "\n\n[Images only; no markdown text detected]"})
+            kwargs = {
+                "model": model_name,
+                "input": [{"role": "user", "content": input_blocks_file}],
+                "max_tokens": max_tokens,
+            }
+            if reasoning:
+                kwargs["reasoning"] = reasoning
+            response = await ark_client.responses.create(**kwargs)
+            content = getattr(response, "output_text", None)
+            if content:
+                return content
+            if hasattr(response, "output") and isinstance(response.output, list):
+                parts = []
+                for item in response.output:
+                    if hasattr(item, "content") and isinstance(item.content, list):
+                        for c in item.content:
+                            if c.get("type") == "output_text":
+                                parts.append(c.get("text", ""))
+                out = "\n".join(parts).strip()
+                if out:
+                    return out
+            return str(response)
+        except Exception:
+            pass
+
+    md_text2, data_urls = collect_paper_images_as_data_urls(paper_dir)
+    if not md_text2 and not data_urls:
+        return ""
+    openai_client = create_openai_client_from_secrets()
+    if openai_client is not None:
+        input_blocks_b64 = []
+        for url in data_urls:
+            input_blocks_b64.append({"type": "input_image", "image_url": url})
+        if md_text2:
+            input_blocks_b64.append({"type": "input_text", "text": task_prompt + "\n\n" + md_text2})
+        else:
+            input_blocks_b64.append({"type": "input_text", "text": task_prompt + "\n\n[Images only; no markdown text detected]"})
+        try:
+            kwargs = {
+                "model": model_name,
+                "input": [{"role": "user", "content": input_blocks_b64}],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            if reasoning:
+                kwargs["reasoning"] = reasoning
+            response = openai_client.responses.create(**kwargs)
+            content = getattr(response, "output_text", None)
+            if content:
+                return content
+            if hasattr(response, "output") and isinstance(response.output, list):
+                parts = []
+                for item in response.output:
+                    if hasattr(item, "content") and isinstance(item.content, list):
+                        for c in item.content:
+                            if c.get("type") == "output_text":
+                                parts.append(c.get("text", ""))
+                return "\n".join(parts).strip()
+            return str(response)
+        except Exception:
+            return ""
+    return ""
+
+def is_ark_openai(secrets_path: str = "mcp_agent.secrets.yaml") -> Tuple[bool, str]:
+    try:
+        if os.path.exists(secrets_path):
+            with open(secrets_path, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            openai_cfg = cfg.get("openai") or {}
+            base_url = str(openai_cfg.get("base_url", ""))
+            return ("ark.cn-beijing.volces.com" in base_url), base_url
+    except Exception:
+        pass
+    return False, ""
+
+def collect_media_assets(
+    paper_dir: str, max_images: int = 16, max_tables: int = 8
+) -> Dict[str, Any]:
+    images: List[str] = []
+    tables: List[str] = []
+    images_dir = os.path.join(paper_dir, "images")
+    if os.path.isdir(images_dir):
+        allowed_ext = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+        files = [
+            os.path.join(images_dir, f)
+            for f in os.listdir(images_dir)
+            if os.path.splitext(f)[1].lower() in allowed_ext
+        ]
+        files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        images = files[:max_images]
+
+    try:
+        from utils.file_processor import FileProcessor
+        md_path = FileProcessor.find_markdown_file(paper_dir)
+        if md_path and os.path.exists(md_path):
+            with open(md_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            segments: List[str] = []
+            lines = content.splitlines()
+            i = 0
+            while i < len(lines):
+                line = lines[i]
+                if "|" in line and line.strip().startswith("|"):
+                    block = [line]
+                    j = i + 1
+                    while j < len(lines) and "|" in lines[j] and lines[j].strip().startswith("|"):
+                        block.append(lines[j])
+                        j += 1
+                    segments.append("\n".join(block))
+                    i = j
+                    continue
+                if "<table" in line:
+                    block = [line]
+                    j = i + 1
+                    while j < len(lines):
+                        block.append(lines[j])
+                        if "</table>" in lines[j]:
+                            break
+                        j += 1
+                    segments.append("\n".join(block))
+                    i = j + 1
+                    continue
+                i += 1
+            for seg in segments[:max_tables]:
+                if len(seg) > 4000:
+                    tables.append(seg[:4000])
+                else:
+                    tables.append(seg)
+    except Exception:
+        pass
+
+    return {"images": images, "tables": tables}
+
+def compose_media_section(media: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    imgs: List[str] = media.get("images") or []
+    tbls: List[str] = media.get("tables") or []
+    if imgs:
+        parts.append("IMAGES:")
+        for p in imgs:
+            parts.append(f"- file://{p}")
+    if tbls:
+        parts.append("TABLES:")
+        for t in tbls:
+            parts.append(t)
+            parts.append("---")
+    return "\n".join(parts)
+
+def build_openai_multimodal_user_content(
+    text: str, images: List[str], tables: List[str]
+) -> List[Dict[str, Any]]:
+    content: List[Dict[str, Any]] = []
+    if text:
+        content.append({"type": "text", "text": text})
+
+    def _guess_mime(path: str) -> str:
+        ext = os.path.splitext(path)[1].lower()
+        return {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+            ".svg": "image/svg+xml",
+        }.get(ext, "image/png")
+
+    for img in images or []:
+        try:
+            with open(img, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("ascii")
+            mime = _guess_mime(img)
+            data_url = f"data:{mime};base64,{b64}"
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": data_url},
+            })
+        except Exception:
+            content.append({"type": "text", "text": f"[image] {img}"})
+
+    for tbl in tables or []:
+        if tbl:
+            content.append({"type": "text", "text": tbl})
+
+    return content

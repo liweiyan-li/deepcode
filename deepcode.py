@@ -10,6 +10,7 @@ import os
 import sys
 import subprocess
 from pathlib import Path
+import yaml
 
 
 def check_dependencies():
@@ -181,6 +182,17 @@ def launch_paper_test(paper_name: str, fast_mode: bool = False):
 
 def main():
     """Main function"""
+    try:
+        secrets_path = Path(__file__).parent / "mcp_agent.secrets.yaml"
+        if secrets_path.exists():
+            with open(secrets_path, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            openai_cfg = cfg.get("openai") or {}
+            key = str(openai_cfg.get("api_key", ""))
+            if key:
+                os.environ["ARK_API_KEY"] = key
+    except Exception:
+        pass
     # Parse command line arguments
     if len(sys.argv) > 1:
         if sys.argv[1] == "test" and len(sys.argv) >= 3:

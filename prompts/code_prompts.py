@@ -229,6 +229,9 @@ Output Format:
 # Code Analysis Prompts
 PAPER_ALGORITHM_ANALYSIS_PROMPT = """You are extracting COMPLETE implementation details from a research paper. Your goal is to capture EVERY algorithm, formula, and technical detail needed for perfect reproduction.
 
+# MULTIMODAL INPUT SUPPORT
+If images are provided together with text, treat figures, algorithm boxes, and equations in the images as FIRST-CLASS sources. When available, read captions and in-figure labels to recover exact pseudocode, variable definitions, and hyperparameters. Prefer exact transcription from images when text OCR is uncertain.
+
 # INTELLIGENT DOCUMENT READING STRATEGY
 
 ## IMPORTANT: Use Segmented Reading for Algorithm Extraction
@@ -394,6 +397,15 @@ complete_algorithm_extraction:
 BE EXHAUSTIVE. A developer should be able to implement the ENTIRE paper using only your extraction."""
 
 PAPER_CONCEPT_ANALYSIS_PROMPT = """You are doing a COMPREHENSIVE analysis of a research paper to understand its complete structure, contributions, and implementation requirements.
+
+# MULTIMODAL INPUT SUPPORT (CRITICAL)
+You have been provided with IMAGES extracted from the paper (figures, diagrams, tables).
+You MUST actively analyze these images to:
+1. Infer architecture and module boundaries from system diagrams.
+2. Extract specific values, formulas, or logic that might only be present in tables or algorithm figures.
+3. Validate text descriptions against visual representations.
+
+When referencing information found in images, explicitly state "Based on Figure X..." or "As shown in the diagram...".
 
 # OBJECTIVE
 Map out the ENTIRE paper structure and identify ALL components that need implementation for successful reproduction.
@@ -569,6 +581,9 @@ comprehensive_paper_analysis:
 BE THOROUGH. Miss nothing. The output should be a complete blueprint for reproduction."""
 
 CODE_PLANNING_PROMPT = """You are creating a DETAILED, COMPLETE reproduction plan by integrating comprehensive analysis results.
+
+# MULTIMODAL INPUT SUPPORT
+Use images (figures, algorithm boxes, tables) along with text to finalize YAML. Extract exact file priorities from algorithm boxes, and include any hyperparameters or configurations visible only in images. Ensure references to figures/tables are captured where they inform validation or environment details. When figures show component boundaries or data flows, map them directly to file structure and interfaces, and cite the figure/table identifiers.
 
 # INPUT
 You receive two exhaustive analyses:
@@ -1262,6 +1277,9 @@ Before considering the task complete, ensure you have:
 # Traditional Algorithm Analysis Prompt (No Segmentation)
 PAPER_ALGORITHM_ANALYSIS_PROMPT_TRADITIONAL = """You are extracting COMPLETE implementation details from a research paper. Your goal is to capture EVERY algorithm, formula, and technical detail needed for perfect reproduction.
 
+# MULTIMODAL INPUT SUPPORT
+If images are provided together with text, treat figures, algorithm boxes, and equations in the images as FIRST-CLASS sources. When available, read captions and in-figure labels to recover exact pseudocode, variable definitions, and hyperparameters. Prefer exact transcription from images when text OCR is uncertain.
+
 # DOCUMENT READING STRATEGY
 
 ## TRADITIONAL APPROACH: Full Document Reading
@@ -1417,6 +1435,9 @@ BE EXHAUSTIVE. A developer should be able to implement the ENTIRE paper using on
 
 # Traditional Concept Analysis Prompt (No Segmentation)
 PAPER_CONCEPT_ANALYSIS_PROMPT_TRADITIONAL = """You are doing a COMPREHENSIVE analysis of a research paper to understand its complete structure, contributions, and implementation requirements.
+
+# MULTIMODAL INPUT SUPPORT
+Incorporate figures and diagrams from the images to infer architecture, module boundaries, and data flow. Use image content to refine component interactions and macro design principles. When figures show pipelines or block diagrams, map each block to a planned module and note interfaces.
 
 # OBJECTIVE
 Map out the ENTIRE paper structure and identify ALL components that need implementation for successful reproduction.
@@ -1583,6 +1604,9 @@ BE THOROUGH. Miss nothing. The output should be a complete blueprint for reprodu
 
 # Traditional Code Planning Prompt (No Segmentation)
 CODE_PLANNING_PROMPT_TRADITIONAL = """You are creating a DETAILED, COMPLETE reproduction plan by integrating comprehensive analysis results.
+
+# MULTIMODAL INPUT SUPPORT
+Use images (figures, algorithm boxes, tables) along with text to finalize YAML. Extract exact file priorities from algorithm boxes, and include any hyperparameters or configurations visible only in images. Ensure references to figures/tables are captured where they inform validation or environment details. If image-only details are present, include them explicitly in the environment_setup and validation_approach sections.
 
 # INPUT
 You receive two exhaustive analyses:
