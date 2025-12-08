@@ -351,10 +351,17 @@ class CodeIndexer:
                 openai_config = self.api_config.get("openai", {})
                 base_url = openai_config.get("base_url")
 
+                import os as _os
+                if not _os.environ.get("ARK_API_KEY"):
+                    try:
+                        _os.environ["ARK_API_KEY"] = openai_key
+                    except Exception:
+                        pass
+                api_key_for_client = _os.environ.get("ARK_API_KEY") or openai_key
                 if base_url:
-                    client = AsyncOpenAI(api_key=openai_key, base_url=base_url)
+                    client = AsyncOpenAI(api_key=api_key_for_client, base_url=base_url)
                 else:
-                    client = AsyncOpenAI(api_key=openai_key)
+                    client = AsyncOpenAI(api_key=api_key_for_client)
 
                 # Test connection with default model from config
                 await client.chat.completions.create(

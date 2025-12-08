@@ -56,6 +56,12 @@ from utils.llm_utils import (
     get_adaptive_agent_config,
     get_adaptive_prompts,
     get_token_limits,
+    get_default_models,
+    is_ark_openai,
+    generate_multimodal_plan,
+    collect_media_assets,
+    compose_media_section,
+    ensure_ark_api_key_env,
 )
 from workflows.agents.document_segmentation_agent import prepare_document_segments
 
@@ -678,10 +684,13 @@ async def run_code_analyzer(
     )
 
     base_max_tokens, _ = get_token_limits()
+    ark_enabled, _ark_url = is_ark_openai()
 
     # STEP 3: Configure parameters - minimal tool filter since paper content is provided
     if use_segmentation:
         max_tokens_limit = base_max_tokens
+        if ark_enabled:
+            max_tokens_limit = min(max_tokens_limit, 2000)
         temperature = 0.2
         max_iterations = 5
         print(
@@ -697,6 +706,8 @@ async def run_code_analyzer(
         }
     else:
         max_tokens_limit = base_max_tokens
+        if ark_enabled:
+            max_tokens_limit = min(max_tokens_limit, 2000)
         temperature = 0.3
         max_iterations = 2
         print(
@@ -720,29 +731,98 @@ async def run_code_analyzer(
         maxTokens=max_tokens_limit,
         temperature=temperature,
         max_iterations=max_iterations,
-        tool_filter=tool_filter
-        if tool_filter
-        else None,  # None = all tools, empty dict = no filtering
+        tool_filter=tool_filter if tool_filter else None,
     )
 
-    # STEP 4: Construct message with paper content directly included
+    # STEP 4: Attempt multimodal per-stage analysis with images if supported
+    try:
+        if paper_content:
+            models = get_default_models()
+            ark_enabled, _ = is_ark_openai()
+            model_name = (
+                "doubao-seed-1-6-thinking-250715" if ark_enabled else models.get("openai")
+            )
+            ensure_ark_api_key_env("mcp_agent.secrets.yaml")
+            concept_mm = await generate_multimodal_plan(
+                paper_dir=paper_dir,
+                task_prompt=prompts["concept_analysis"],
+                model_name=model_name,
+                max_tokens=max_tokens_limit,
+                temperature=temperature,
+            )
+            algorithm_mm = await generate_multimodal_plan(
+                paper_dir=paper_dir,
+                task_prompt=prompts["algorithm_analysis"],
+                model_name=model_name,
+                max_tokens=max_tokens_limit,
+                temperature=temperature,
+            )
+
+            mm_sections = []
+            if concept_mm:
+                mm_sections.append("# Concept Analysis\n" + concept_mm)
+            if algorithm_mm:
+                mm_sections.append("# Algorithm Analysis\n" + algorithm_mm)
+
+            if mm_sections:
+                planning_input = "\n\n".join(mm_sections)
+                planning_mm = await generate_multimodal_plan(
+                    paper_dir=paper_dir,
+                    task_prompt=prompts["code_planning"] + "\n\n" + planning_input,
+                    model_name=model_name,
+                    max_tokens=max_tokens_limit,
+                    temperature=temperature,
+                )
+                if planning_mm and len(planning_mm.strip()) > 0:
+                    return planning_mm
+    except Exception as e:
+        print(f"⚠️ Multimodal planning failed or unavailable: {e}, falling back to text mode")
+
+    # STEP 5: Always attempt multimodal planning with images; avoid text-only when paper is present
+    message = None
     if paper_content:
-        # Paper content provided directly - LLM only needs to analyze, not read files
-        message = f"""Analyze the research paper provided below. The paper file has been pre-loaded for you.
+        try:
+            models = get_default_models()
+            ark_enabled, _ = is_ark_openai()
+            model_name = (
+                "doubao-seed-1-6-thinking-250715" if ark_enabled else models.get("openai")
+            )
+            ensure_ark_api_key_env("mcp_agent.secrets.yaml")
+            planning_mm2 = await generate_multimodal_plan(
+                paper_dir=paper_dir,
+                task_prompt=prompts["code_planning"]
+                + "\n\n" 
+                + "Use ALL provided images (figures/algorithms) to finalize YAML. The full paper text is below for reference."
+                + "\n\n"
+                + paper_content,
+                model_name=model_name,
+                max_tokens=max_tokens_limit,
+                temperature=temperature,
+            )
+            if planning_mm2 and len(planning_mm2.strip()) > 0:
+                return planning_mm2
+        except Exception as e:
+            print(f"⚠️ Multimodal planning (fallback) failed: {e}")
 
-=== PAPER CONTENT START ===
-{paper_content}
-=== PAPER CONTENT END ===
-
-Based on this paper, generate a comprehensive code reproduction plan that includes:
-
-1. Complete system architecture and component breakdown
-2. All algorithms, formulas, and implementation details
-3. Detailed file structure and implementation roadmap
-
-You may use web search (brave_web_search) if you need clarification on algorithms, methods, or concepts.
-
-The goal is to create a reproduction plan detailed enough for independent implementation."""
+        # Final images-only attempt: ensure images are used even if text handling fails
+        try:
+            models = get_default_models()
+            ark_enabled, _ = is_ark_openai()
+            model_name = (
+                "doubao-seed-1-6-thinking-250715" if ark_enabled else models.get("openai")
+            )
+            final_try_mm = await generate_multimodal_plan(
+                paper_dir=paper_dir,
+                task_prompt=prompts["code_planning"]
+                + "\n\nUse ONLY the images (figures/algorithm boxes) to reconstruct architecture and planning YAML if text is unavailable.",
+                model_name=model_name,
+                max_tokens=max_tokens_limit,
+                temperature=temperature,
+            )
+            if final_try_mm and len(final_try_mm.strip()) > 0:
+                return final_try_mm
+        except Exception:
+            pass
     else:
         # Fallback: paper not found, agents will need to find it
         message = f"""Analyze the research paper in directory: {paper_dir}
@@ -758,7 +838,7 @@ The goal is to create a reproduction plan detailed enough for independent implem
     max_retries = 3
     retry_count = 0
 
-    while retry_count < max_retries:
+    while message is not None and retry_count < max_retries:
         try:
             print(
                 f"🚀 Attempting code analysis (attempt {retry_count + 1}/{max_retries})"
@@ -969,7 +1049,7 @@ async def synthesize_workspace_infrastructure_agent(
     print(f"   Research workspace: {paper_dir}")
     print("   AI-driven path optimization: active")
 
-    return {
+    info = {
         "paper_dir": paper_dir,
         "standardized_text": result["standardized_text"],
         "reference_path": os.path.join(paper_dir, "reference.txt"),
@@ -981,6 +1061,20 @@ async def synthesize_workspace_infrastructure_agent(
         ),
         "workspace_dir": workspace_dir,
     }
+
+    try:
+        if isinstance(result, dict):
+            images_path = result.get("images_path")
+            if not images_path:
+                candidate = os.path.join(paper_dir, "images")
+                if os.path.isdir(candidate):
+                    images_path = candidate
+            if images_path:
+                info["images_path"] = images_path
+    except Exception:
+        pass
+
+    return info
 
 
 async def orchestrate_reference_intelligence_agent(
@@ -1183,8 +1277,20 @@ async def orchestrate_code_planning_agent(
 
     initial_plan_path = dir_info["initial_plan_path"]
 
-    # Check if initial plan already exists
-    if not os.path.exists(initial_plan_path):
+    # Check for images to decide if we should force regeneration
+    images_dir = os.path.join(dir_info["paper_dir"], "images")
+    has_images = os.path.isdir(images_dir) and any(
+        name.lower().endswith((".png", ".jpg", ".jpeg"))
+        for name in os.listdir(images_dir)
+        if not name.startswith(".")
+    )
+
+    # If images are present, we force regeneration to ensure multimodal context is used.
+    # Otherwise, we only generate if the plan doesn't exist.
+    if has_images or not os.path.exists(initial_plan_path):
+        if has_images and os.path.exists(initial_plan_path):
+            print("🔁 Images detected - forcing plan regeneration with multimodal input...")
+        
         # Use segmentation setting from preprocessing phase
         use_segmentation = dir_info.get("use_segmentation", True)
         print(f"📊 Planning mode: {'Segmented' if use_segmentation else 'Traditional'}")
@@ -1195,6 +1301,9 @@ async def orchestrate_code_planning_agent(
         with open(initial_plan_path, "w", encoding="utf-8") as f:
             f.write(initial_plan_result)
         print(f"Initial plan saved to {initial_plan_path}")
+    else:
+        print(f"✅ Existing initial plan found at {initial_plan_path} (No images to process)")
+    
 
 
 async def automate_repository_acquisition_agent(
