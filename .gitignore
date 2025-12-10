@@ -59,7 +59,7 @@ ignore_this.txt
 *.ignore.*
 
 # unit-test files
-test_*
+test/
 run_indexer_with_filtering.py
 
 # Cline files
