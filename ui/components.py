@@ -15,14 +15,63 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
-import streamlit as st
 
 from utils.cross_platform_file_handler import get_file_handler
+
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 ICON_DIR = BASE_DIR / "assets" / "icons"
 
+# components.txt (添加新的组件函数)
 
+import streamlit as st
+from .handlers import handle_iteration_request
+
+def iteration_prompt_component():
+    """显示迭代提示和反馈输入组件"""
+    if st.session_state.get("iteration_needed", False):
+        st.markdown("### <span style='color: #FFA500;'>代码生成完成</span>", unsafe_allow_html=True)
+        st.info("生成已结束。您是否需要根据反馈进行修改？")
+
+        # 使用 st.form 确保提交反馈时能触发特定的回调
+        with st.form(key="iteration_form"):
+            user_feedback = st.text_area(
+                label="请提供您的修改意见：",
+                placeholder="例如：函数 logic.py 中的 calculate 函数逻辑有误，应使用加法而非减法。",
+                height=200,
+                key="user_iteration_feedback" # 这个 key 与 session state 变量名一致
+            )
+            submit_button = st.form_submit_button(label="提交修改意见", type="primary")
+
+        if submit_button:
+            # 提交按钮被按下，调用处理器
+            handle_iteration_request()
+
+        # 添加一个“完成”按钮，允许用户在不需要修改时退出迭代流程
+        if st.button("无需修改，完成"):
+             st.session_state.iteration_needed = False
+             st.session_state.processing = False # 假设 processing 状态表示整个生成流程
+             st.rerun()
+
+def iteration_status_component():
+    """显示迭代过程中的状态"""
+    if st.session_state.get("running_iteration", False):
+        st.info("正在根据您的反馈修改代码，请稍候...")
+        # 可以添加一个简单的进度条或占位符
+        # progress_bar = st.progress(0)
+        # status_text = st.empty()
+
+    # 显示迭代结果（如果存在）
+    if "iteration_result" in st.session_state:
+        result = st.session_state.iteration_result
+        if result.get("status") == "iteration_error":
+            st.error(f"迭代过程中发生错误: {result.get('error')}")
+        else:
+            st.success("代码迭代修改完成！")
+            # 可以选择性地展示迭代结果详情
+            st.json(result)
+            
+            
 @lru_cache(maxsize=64)
 def _icon_data_uri(name: str) -> str:
     path = ICON_DIR / f"{name}.png"
@@ -66,64 +115,6 @@ def display_header():
         unsafe_allow_html=True,
     )
 
-
-def display_features():
-    """Display feature cards grid"""
-    feature_cards = [
-        {
-            "icon": "feature_synthesis",
-            "fallback": "🧬",
-            "title": "Neural Synthesis",
-            "desc": "Transform research papers directly into executable repositories via multi-agent LLM pipelines.",
-        },
-        {
-            "icon": "feature_hyper",
-            "fallback": "⚡",
-            "title": "Hyper-Speed Mode",
-            "desc": "Acceleration layer that parallelizes retrieval, planning, and implementation for fastest delivery.",
-        },
-        {
-            "icon": "feature_cognition",
-            "fallback": "🧠",
-            "title": "Cognitive Context",
-            "desc": "Semantic memory graphs retain methodology, datasets, and evaluation strategy during reasoning.",
-        },
-        {
-            "icon": "feature_secure",
-            "fallback": "🛡️",
-            "title": "Secure Sandbox(Coming Soon)",
-            "desc": "Isolated execution & validation environment keeps experiments safe and reproducible.",
-        },
-    ]
-
-    cards_html = ""
-    for card in feature_cards:
-        icon_markup = icon_img(
-            card["icon"],
-            48,
-            "filter:drop-shadow(0 0 10px rgba(0,242,255,0.4));",
-        )
-        if not icon_markup:
-            icon_markup = f'<span style="font-size:2rem;">{card["fallback"]}</span>'
-
-        cards_html += f"""
-        <div class="cyber-card">
-            <div class="card-icon">
-                {icon_markup}
-                </div>
-            <div class="card-title">{card['title']}</div>
-            <div class="card-desc">{card['desc']}</div>
-                </div>
-        """
-
-    st.markdown(
-        f"""
-        <div class="feature-grid">
-            {cards_html}
-        </div>
-    """,
-        unsafe_allow_html=True,
-    )
 
 
 def display_status(message: str, status_type: str = "info"):
@@ -191,6 +182,7 @@ def enhanced_progress_display_component(
             {"title": "DOWNLOAD", "subtitle": "Collect refs"},
             {"title": "PLAN", "subtitle": "Blueprint"},
             {"title": "CODE", "subtitle": "Implement"},
+            {"title": "TEST", "subtitle": "Test suite"},
         ]
     else:
         workflow_steps = [
@@ -202,6 +194,7 @@ def enhanced_progress_display_component(
             {"title": "REPO", "subtitle": "GitHub sync"},
             {"title": "INDEX", "subtitle": "Vectorize"},
             {"title": "CODE", "subtitle": "Implementation"},
+            {"title": "TEST", "subtitle": "Test gen"},
         ]
 
     st.markdown("### 🛰️ Workflow Monitor")
@@ -612,6 +605,15 @@ def sidebar_control_panel():
         """,
             unsafe_allow_html=True,
         )
+
+        current_indexing = st.session_state.get("enable_indexing", False)
+        toggle_val = st.toggle(
+            "开启检索（关闭快速模式）",
+            value=current_indexing,
+            key="sidebar_enable_indexing",
+            help="开启后执行参考检索、仓库下载与索引；关闭为快速模式"
+        )
+        st.session_state.enable_indexing = bool(toggle_val)
 
         workflow_start = st.session_state.get("workflow_start_time")
 

@@ -7,7 +7,6 @@ from typing import Optional
 
 import streamlit as st
 from .components import (
-    display_features,
     display_header,
     footer_component,
     input_method_selector,
@@ -57,9 +56,11 @@ def main_layout():
 
     if show_results and last_result:
         results_display_component(last_result, st.session_state.task_counter)
+        from .components import iteration_prompt_component, iteration_status_component
+        iteration_prompt_component()
+        iteration_status_component()
     else:
         # Landing State
-        display_features()
         system_status_component()
 
         st.markdown('<div style="height: 2rem;"></div>', unsafe_allow_html=True)

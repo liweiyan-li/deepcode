@@ -1,6 +1,6 @@
 $schema: ./schema/mcp-agent.config.schema.json
 anthropic: null
-default_search_server: brave
+default_search_server: github
 document_segmentation:
   enabled: false
   size_threshold_chars: 50000
@@ -17,6 +17,14 @@ logger:
   - file
 mcp:
   servers:
+    github:
+      args:
+      - -y
+      - '@modelcontextprotocol/server-github'
+      command: npx
+      env:
+        GITHUB_PERSONAL_ACCESS_TOKEN: ''
+
     bocha-mcp:
       args:
       - tools/bocha_search_server.py
@@ -24,20 +32,20 @@ mcp:
       env:
         BOCHA_API_KEY: ''
         PYTHONPATH: .
-    brave:
-      # macos and linux should use this
-      args:
-      - -y
-      - '@modelcontextprotocol/server-brave-search'
-      command: npx
+    # brave:
+    #   # macos and linux should use this
+    #   args:
+    #   - -y
+    #   - '@modelcontextprotocol/server-brave-search'
+    #   command: npx
 
       # windows should use this
       # args:
       # # please use the correct path for your system
       # - C:/Users/LEGION/AppData/Roaming/npm/node_modules/@modelcontextprotocol/server-brave-search/dist/index.js
       # command: node
-      env:
-        BRAVE_API_KEY: ''
+      # env:
+      #   BRAVE_API_KEY: ''
     filesystem:
       # macos and linux should use this
       args:
@@ -53,6 +61,14 @@ mcp:
       # - .
       # command: node
 
+    code-iteration:
+      args:
+      - tools/code_implementation_server.py
+      command: python
+      description: Paper code reproduction tool server - provides file operations,
+          code execution, search and other functions
+      env:
+          PYTHONPATH: .
 
     code-implementation:
       args:

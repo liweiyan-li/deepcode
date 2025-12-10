@@ -24,6 +24,96 @@ from workflows.agent_orchestration_engine import (
 )
 from .sidebar_feed import log_sidebar_event, ensure_sidebar_logging
 
+# handlers.txt (添加新的处理函数)
+
+import asyncio
+from workflows.code_iteration_workflow import CodeIterationWorkflow
+
+async def run_iteration_async(user_intent: str, target_directory: str, original_code_dir: str):
+    """异步运行迭代工作流的辅助函数"""
+    workflow = CodeIterationWorkflow() # 实例化工作流
+    print("实例化代码迭代工作流成功")
+    try:
+        # 设置一个合理的超时时间，防止 LLM 无响应时无限等待
+        timeout_seconds = 600  # 例如，10分钟
+        result = await asyncio.wait_for(
+            workflow.run_iteration(
+                user_intent=user_intent,
+                target_directory=target_directory,
+                original_code_dir=original_code_dir,
+                iteration_dir_name="iteration_bug_fix",
+                max_iterations=3,
+                enable_read_tools=True
+                # test_report_before=st.session_state.get("test_report_before"), # 如果有
+            ),
+            timeout=timeout_seconds
+        )
+        return result
+    except asyncio.TimeoutError:
+        print(f"迭代过程超时 ({timeout_seconds} 秒)")
+        return {"status": "iteration_error", "error": f"迭代过程超时 ({timeout_seconds} 秒)"}
+    except Exception as e:
+        print(f"迭代工作流执行异常: {e}")
+        return {"status": "iteration_error", "error": str(e)}
+
+def handle_iteration_request():
+    """处理用户提交的迭代请求"""
+    if st.session_state.running_iteration:
+        # 防止重复提交
+        return
+
+    feedback = st.session_state.user_iteration_feedback.strip()
+    print(f"用户反馈: {feedback}")
+    if not feedback:
+        st.warning("请提供修改意见。")
+        return
+
+    # --- 从 session_state 获取必要的路径信息 ---
+    target_directory = st.session_state.get("iteration_target_directory")
+    # 为了测试，暂时硬编码
+    # target_directory = "/home/user02/deepcode/deepcode-wei/deepcode_lab/papers/14"
+    original_code_dir = st.session_state.get("iteration_original_code_dir", "generate_code")
+    print(f"目标代码目录: {target_directory}")
+    if not target_directory:
+        st.error("无法获取目标代码目录 (target_directory)，无法进行迭代。")
+        return
+    if not original_code_dir:
+        st.error("无法获取原始代码目录 (original_code_dir)，无法进行迭代。")
+        return
+
+    # --- 设置状态，开始迭代 ---
+    st.session_state.running_iteration = True
+    st.session_state.iteration_needed = False # 隐藏迭代询问
+    # 清空上一次的迭代结果（如果有的话）
+    if "iteration_result" in st.session_state:
+        print("清除上一次的迭代结果")
+        del st.session_state["iteration_result"]
+    # 注意：这里不再调用 st.rerun() 来启动后台任务
+
+    # --- 运行迭代 ---
+    try:
+        print("开始运行代码迭代工作流...")
+        # 使用 asyncio.run 在当前上下文中运行异步函数
+        # 这是推荐的在 Streamlit UI 回调中运行顶层异步任务的方式
+        iteration_result = asyncio.run(run_iteration_async(feedback, target_directory, original_code_dir))
+
+        # --- 处理迭代结果 ---
+        st.session_state.iteration_result = iteration_result
+        st.session_state.running_iteration = False
+        print("代码迭代工作流执行完成。")
+
+    except Exception as e:
+        print(f"运行迭代工作流时发生异常: {e}")
+        st.error(f"运行迭代工作流时发生错误: {e}")
+        st.session_state.running_iteration = False
+        st.session_state.iteration_result = {"status": "iteration_error", "error": str(e)}
+
+    # --- 在 try/except 块结束后，刷新 UI 以显示最终结果 ---
+    st.rerun() # <--- 在所有处理完成后刷新 UI
+
+
+
+
 
 def _emergency_cleanup():
     """
@@ -120,6 +210,7 @@ async def process_input_async(
                 progress_callback,
                 enable_indexing=enable_indexing,  # Pass indexing control parameter
             )
+                
 
             return {
                 "analysis_result": "Integrated into complete workflow",
@@ -396,10 +487,11 @@ def handle_processing_workflow(
             25: 2,  # Download
             40: 3,  # Plan (now prioritized over References, 40%)
             85: 4,  # Implement (skip References, Repos and Index)
-            100: 4,  # Complete
+            92: 5,  # Test generation
+            100: 5,  # Complete
         }
     else:
-        # Full workflow step mapping - new order: Initialize -> Analyze -> Download -> Plan -> References -> Repos -> Index -> Implement
+        # Full workflow step mapping - new order: Initialize -> Analyze -> Download -> Plan -> References -> Repos -> Index -> Implement -> Test
         step_mapping = {
             5: 0,  # Initialize
             10: 1,  # Analyze
@@ -409,7 +501,8 @@ def handle_processing_workflow(
             60: 5,  # Repos (GitHub download)
             70: 6,  # Index (code indexing)
             85: 7,  # Implement (code implementation)
-            100: 7,  # Complete
+            92: 8,  # Test generation
+            100: 8,  # Complete
         }
 
     current_step = 0
@@ -480,6 +573,10 @@ def handle_processing_workflow(
 
     # Update final status based on results
     if result["status"] == "success":
+        repo_result = result.get("repo_result", {})
+        st.session_state.iteration_target_directory = repo_result# 或 result.target_directory
+        st.session_state.iteration_original_code_dir = "generate_code" # 或从 result 中获取
+        st.session_state.iteration_needed = True # 标记需要询问迭代
         # Complete all steps
         update_progress(100, "✅ All processing stages completed successfully!")
         update_step_indicator(
@@ -819,6 +916,20 @@ def initialize_session_state():
         st.session_state.workflow_input_source = None
     if "workflow_input_type" not in st.session_state:
         st.session_state.workflow_input_type = None
+    if "guided_payload" not in st.session_state:
+        st.session_state.guided_payload = None
+    if "iteration_needed" not in st.session_state:
+        st.session_state.iteration_needed = False # 初始生成完成后，是否需要迭代
+    if "user_iteration_feedback" not in st.session_state:
+        st.session_state.user_iteration_feedback = "" # 用户提供的迭代反馈
+    if "running_iteration" not in st.session_state:
+        st.session_state.running_iteration = False
+    
+    if "iteration_target_directory" not in st.session_state:
+        st.session_state.iteration_target_directory = None
+    if "iteration_original_code_dir" not in st.session_state:
+        st.session_state.iteration_original_code_dir = "generate_code"
+        
 
 
 def cleanup_resources():
