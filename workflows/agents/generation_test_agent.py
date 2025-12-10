@@ -128,19 +128,13 @@ Please:
 1. Analyze the codebase structure in {code_directory}
 2. Read the implementation plan from {plan_file_path}
 3. Generate a complete test suite including:
-    - Unit tests for core components
-    - Integration tests for the pipeline
-    - Validation tests for paper results
+   - Unit tests for core components
+   - Integration tests for the pipeline
+   - Validation tests for paper results
 4. Create test structure with conftest.py and test documentation
 5. Provide a summary of generated tests
 
-CRITICAL PATH RULES:
-- All output files MUST be written under the directory: {code_directory}/tests
-- Use absolute paths when creating/writing files (e.g., write_file(path="{code_directory}/tests/..."))
-- If the tests directory does not exist, create it explicitly at: {code_directory}/tests
-- Do NOT write any files to the repository root or other directories.
-
-Use the code-implementation tools to read code, list directories, create folders, and write test files.
+Use the filesystem tools to read code, create directories, and write test files.
 """
             
             # Configure request parameters to use code-implementation server tools

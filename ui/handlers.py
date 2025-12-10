@@ -201,7 +201,12 @@ async def process_input_async(
 
             # Initialize progress
             if progress_callback:
-                progress_callback(5, "🚀 Initializing AI research engine...")
+                if input_type == "chat":
+                    progress_callback(
+                        5, "🚀 Initializing chat-based planning pipeline..."
+                    )
+                else:
+                    progress_callback(5, "🚀 Initializing AI research engine...")
 
             # Use traditional multi-agent research pipeline for files/URLs
             repo_result = await execute_multi_agent_research_pipeline(
@@ -469,17 +474,28 @@ def handle_processing_workflow(
     )
 
     # Display enhanced progress components
+    chat_mode = input_type == "chat"
     progress_bar, status_text, step_indicators, workflow_steps = (
-        enhanced_progress_display_component(enable_indexing)
+        enhanced_progress_display_component(enable_indexing, chat_mode)
     )
     log_sidebar_event(
         "SYSTEM",
-        "Workflow started (research mode)",
+        f"Workflow started ({'guided/chat' if chat_mode else 'research'} mode)",
         extra={"input_type": input_type, "indexing": enable_indexing},
     )
 
     # Step mapping: map progress percentages to step indices - adjust based on mode and indexing toggle
-    if not enable_indexing:
+    if chat_mode:
+        # Chat mode step mapping: Initialize -> Planning -> Setup -> Save Plan -> Implement
+        step_mapping = {
+            5: 0,  # Initialize
+            30: 1,  # Planning (analyzing requirements)
+            50: 2,  # Setup (creating workspace)
+            70: 3,  # Save Plan (saving implementation plan)
+            85: 4,  # Implement (generating code)
+            100: 4,  # Complete
+        }
+    elif not enable_indexing:
         # Skip indexing-related steps progress mapping - fast mode order: Initialize -> Analyze -> Download -> Plan -> Implement
         step_mapping = {
             5: 0,  # Initialize
@@ -537,7 +553,9 @@ def handle_processing_workflow(
         time.sleep(0.3)  # Brief pause for users to see progress changes
 
     # Step 1: Initialization
-    if enable_indexing:
+    if chat_mode:
+        update_progress(5, "🚀 Initializing chat-based planning engine...")
+    elif enable_indexing:
         update_progress(5, "🚀 Initializing AI research engine and loading models...")
     else:
         update_progress(
@@ -585,7 +603,12 @@ def handle_processing_workflow(
 
         # Display success information
         st.balloons()  # Add celebration animation
-        if enable_indexing:
+        if chat_mode:
+            display_status(
+                "🎉 Chat workflow completed! Your requirements have been analyzed and code has been generated.",
+                "success",
+            )
+        elif enable_indexing:
             display_status(
                 "🎉 Workflow completed! Your research paper has been successfully processed and code has been generated.",
                 "success",
@@ -693,6 +716,203 @@ def cleanup_temp_file(input_source: str, input_type: str):
             logging.getLogger(__name__).warning(
                 f"Failed to cleanup temp file {input_source}: {e}"
             )
+
+
+async def handle_requirement_analysis_workflow(
+    user_input: str, analysis_mode: str, user_answers: Dict[str, str] = None
+) -> Dict[str, Any]:
+    """
+    Handle requirement analysis workflow
+
+    Args:
+        user_input: User initial requirements
+        analysis_mode: Analysis mode ("generate_questions" or "summarize_requirements")
+        user_answers: User answer dictionary
+
+    Returns:
+        Processing result dictionary
+    """
+    try:
+        # Import required modules
+        from workflows.agent_orchestration_engine import (
+            execute_requirement_analysis_workflow,
+        )
+
+        # Create progress callback function
+        def update_progress(progress: int, message: str):
+            # Display progress in Streamlit
+            st.session_state.current_progress = progress
+            st.session_state.current_message = message
+
+        # Execute requirement analysis workflow
+        result = await execute_requirement_analysis_workflow(
+            user_input=user_input,
+            analysis_mode=analysis_mode,
+            user_answers=user_answers,
+            logger=None,  # Can pass in logger
+            progress_callback=update_progress,
+        )
+
+        return result
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "message": f"Requirement analysis workflow execution failed: {str(e)}",
+        }
+
+
+async def handle_requirement_modification_workflow(
+    current_requirements: str, modification_feedback: str
+) -> Dict[str, Any]:
+    """
+    Handle requirement modification workflow
+
+    Args:
+        current_requirements: Current requirement document content
+        modification_feedback: User's modification requests and feedback
+
+    Returns:
+        Processing result dictionary
+    """
+    try:
+        # Import required modules
+        from workflows.agents.requirement_analysis_agent import RequirementAnalysisAgent
+
+        # Create progress callback function
+        def update_progress(progress: int, message: str):
+            # Display progress in Streamlit
+            st.session_state.current_progress = progress
+            st.session_state.current_message = message
+
+        update_progress(10, "🔧 Initializing requirement modification agent...")
+
+        # Initialize RequirementAnalysisAgent
+        agent = RequirementAnalysisAgent()
+
+        # Initialize agent (LLM is initialized internally)
+        await agent.initialize()
+
+        update_progress(50, "✏️ Modifying requirements based on your feedback...")
+
+        # Modify requirements
+        result = await agent.modify_requirements(
+            current_requirements=current_requirements,
+            modification_feedback=modification_feedback,
+        )
+
+        # Cleanup
+        await agent.cleanup()
+
+        update_progress(100, "✅ Requirements modification completed!")
+
+        return {
+            "status": "success",
+            "result": result,
+            "message": "Requirements modification completed successfully",
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "message": f"Requirements modification workflow execution failed: {str(e)}",
+        }
+
+
+def handle_guided_mode_processing():
+    """Handle asynchronous processing for guided mode"""
+    # Check if questions need to be generated
+    if st.session_state.get("questions_generating", False):
+        st.session_state.questions_generating = False
+
+        # Asynchronously generate questions
+        initial_req = st.session_state.get("initial_requirement", "")
+        if initial_req:
+            try:
+                # Use asynchronous processing to generate questions
+                result = run_async_task_simple(
+                    handle_requirement_analysis_workflow(
+                        user_input=initial_req, analysis_mode="generate_questions"
+                    )
+                )
+
+                if result["status"] == "success":
+                    # Parse JSON result
+                    import json
+
+                    questions = json.loads(result["result"])
+                    st.session_state.generated_questions = questions
+                else:
+                    st.error(
+                        f"Question generation failed: {result.get('error', 'Unknown error')}"
+                    )
+
+            except Exception as e:
+                st.error(f"Question generation exception: {str(e)}")
+
+    # Check if detailed requirements need to be generated
+    if st.session_state.get("requirements_generating", False):
+        st.session_state.requirements_generating = False
+
+        # Asynchronously generate detailed requirements
+        initial_req = st.session_state.get("initial_requirement", "")
+        user_answers = st.session_state.get("user_answers", {})
+
+        if initial_req:
+            try:
+                # Use asynchronous processing to generate requirement summary
+                result = run_async_task_simple(
+                    handle_requirement_analysis_workflow(
+                        user_input=initial_req,
+                        analysis_mode="summarize_requirements",
+                        user_answers=user_answers,
+                    )
+                )
+
+                if result["status"] == "success":
+                    st.session_state.detailed_requirements = result["result"]
+                else:
+                    st.error(
+                        f"Requirement summary generation failed: {result.get('error', 'Unknown error')}"
+                    )
+
+            except Exception as e:
+                st.error(f"Requirement summary generation exception: {str(e)}")
+
+    # Check if requirements need to be edited
+    if st.session_state.get("requirements_editing", False):
+        st.session_state.requirements_editing = False
+        st.info("🔧 Starting requirement modification process...")
+
+        # Asynchronously modify requirements based on user feedback
+        current_requirements = st.session_state.get("detailed_requirements", "")
+        edit_feedback = st.session_state.get("edit_feedback", "")
+
+        if current_requirements and edit_feedback:
+            try:
+                # Use asynchronous processing to modify requirements
+                result = run_async_task_simple(
+                    handle_requirement_modification_workflow(
+                        current_requirements=current_requirements,
+                        modification_feedback=edit_feedback,
+                    )
+                )
+
+                if result["status"] == "success":
+                    st.session_state.detailed_requirements = result["result"]
+                    st.session_state.requirement_analysis_step = "summary"
+                    st.session_state.edit_feedback = ""
+                    st.success("✅ Requirements updated successfully!")
+                    st.rerun()
+                else:
+                    st.error(
+                        f"Requirements modification failed: {result.get('error', 'Unknown error')}"
+                    )
+
+            except Exception as e:
+                st.error(f"Requirements modification exception: {str(e)}")
 
 
 def _background_workflow_runner(
@@ -901,6 +1121,35 @@ def initialize_session_state():
             False  # Default enable indexing functionality
         )
 
+    # Requirement analysis related states
+    if "requirement_analysis_mode" not in st.session_state:
+        st.session_state.requirement_analysis_mode = "direct"  # direct/guided
+    if "requirement_analysis_step" not in st.session_state:
+        st.session_state.requirement_analysis_step = "input"  # input/questions/summary
+    if "generated_questions" not in st.session_state:
+        st.session_state.generated_questions = []
+    if "user_answers" not in st.session_state:
+        st.session_state.user_answers = {}
+    if "detailed_requirements" not in st.session_state:
+        st.session_state.detailed_requirements = ""
+    if "initial_requirement" not in st.session_state:
+        st.session_state.initial_requirement = ""
+    if "questions_generating" not in st.session_state:
+        st.session_state.questions_generating = False
+    if "requirements_generating" not in st.session_state:
+        st.session_state.requirements_generating = False
+    if "requirements_confirmed" not in st.session_state:
+        st.session_state.requirements_confirmed = False
+    if "edit_feedback" not in st.session_state:
+        st.session_state.edit_feedback = ""
+    if "requirements_editing" not in st.session_state:
+        st.session_state.requirements_editing = False
+    if "guided_initial_requirement" not in st.session_state:
+        st.session_state.guided_initial_requirement = ""
+    if "guided_edit_feedback" not in st.session_state:
+        st.session_state.guided_edit_feedback = ""
+    if "confirmed_requirement_text" not in st.session_state:
+        st.session_state.confirmed_requirement_text = None
     if "sidebar_events" not in st.session_state:
         st.session_state.sidebar_events = []
     ensure_sidebar_logging()
