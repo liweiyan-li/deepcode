@@ -503,10 +503,11 @@ def handle_processing_workflow(
             25: 2,  # Download
             40: 3,  # Plan (now prioritized over References, 40%)
             85: 4,  # Implement (skip References, Repos and Index)
-            100: 4,  # Complete
+            92: 5,  # Test generation
+            100: 5,  # Complete
         }
     else:
-        # Full workflow step mapping - new order: Initialize -> Analyze -> Download -> Plan -> References -> Repos -> Index -> Implement
+        # Full workflow step mapping - new order: Initialize -> Analyze -> Download -> Plan -> References -> Repos -> Index -> Implement -> Test
         step_mapping = {
             5: 0,  # Initialize
             10: 1,  # Analyze
@@ -516,7 +517,8 @@ def handle_processing_workflow(
             60: 5,  # Repos (GitHub download)
             70: 6,  # Index (code indexing)
             85: 7,  # Implement (code implementation)
-            100: 7,  # Complete
+            92: 8,  # Test generation
+            100: 8,  # Complete
         }
 
     current_step = 0

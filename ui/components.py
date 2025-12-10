@@ -257,6 +257,7 @@ def enhanced_progress_display_component(
             {"title": "DOWNLOAD", "subtitle": "Collect refs"},
             {"title": "PLAN", "subtitle": "Blueprint"},
             {"title": "CODE", "subtitle": "Implement"},
+            {"title": "TEST", "subtitle": "Test suite"},
         ]
     else:
         workflow_steps = [
@@ -268,6 +269,7 @@ def enhanced_progress_display_component(
             {"title": "REPO", "subtitle": "GitHub sync"},
             {"title": "INDEX", "subtitle": "Vectorize"},
             {"title": "CODE", "subtitle": "Implementation"},
+            {"title": "TEST", "subtitle": "Test gen"},
         ]
 
     st.markdown("### 🛰️ Workflow Monitor")
