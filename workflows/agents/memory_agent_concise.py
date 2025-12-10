@@ -115,6 +115,149 @@ class ConciseMemoryAgent:
         self.logger.info(
             "📝 NEW LOGIC: Memory clearing triggered after each write_file call"
         )
+        # change
+        self.modified_files = [] # 记录每次变更的文件
+        self.test_results = []  # 需要关注的文件集合
+        self.iteration_tool_results = []  # 记录每次迭代的工具结果
+        self.priority_files = set()  # 优先关注的文件集合
+        self.file_access_log = {}  # 记录文件访问日志
+        self.plan_content = initial_plan_content
+        
+        self.logger.info("📝 NEW LOGIC: Memory clearing triggered after each write_file call") # Original log
+        # Changes for modification tracking
+        self.file_changes = [] # Record file changes during iteration
+        # self.priority_files = [] # Already defined above as set
+
+        self.code_summary_path = os.path.join(self.save_path, "implement_code_summary.md")
+        self.logger.info(f"Concise Memory Agent initialized with target directory: {self.save_path}")
+        self.logger.info(f"Code directory: {self.code_directory}")
+        self.logger.info(f"Code summary will be saved to: {self.code_summary_path}")
+    
+    # change
+    def record_file_modification(self, file_path: str, iteration_num: int):
+        """Record a file modification during iteration.
+
+        Args:
+            file_path: Path of the modified file.
+            iteration_num: The current iteration number when the modification occurred.
+        """
+        # Add file to modified files list if not already present
+        if file_path not in self.modified_files:
+            self.modified_files.append(file_path)
+            self.logger.info(f"📋 File modification recorded: {file_path} in iteration {iteration_num}")
+        else:
+            self.logger.debug(f"File already recorded as modified: {file_path}")
+
+        # Also record in the general file_changes list (as per original comment in init)
+        self.file_changes.append({"file_path": file_path, "iteration": iteration_num})
+        # Add to priority files set for iteration context
+        self.priority_files.add(file_path)
+
+    def record_test_result(self, test_result: Dict[str, Any], iteration_num: int):
+        """Record a test result during iteration.
+
+        Args:
+            test_result: The test result dictionary (e.g., {"success": True, "report": "..."}).
+            iteration_num: The current iteration number when the test was run.
+        """
+        self.test_results.append({
+            "result": test_result,
+            "iteration": iteration_num,
+            "timestamp": time.time()
+        })
+        status = "PASSED" if test_result.get("success") else "FAILED"
+        self.logger.info(f"🧪 Test result recorded for iteration {iteration_num}: {status}")
+
+    def record_iteration_tool_result(self, tool_name: str, tool_input: Dict[str, Any], tool_result: Any, iteration_num: int):
+        """Record a tool result during the iteration process (separate from implementation loop).
+
+        Args:
+            tool_name: Name of the tool called.
+            tool_input: Input parameters for the tool.
+            tool_result: Result returned by the tool.
+            iteration_num: The current iteration number.
+        """
+        self.iteration_tool_results.append({
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "tool_result": tool_result,
+            "iteration": iteration_num,
+            "timestamp": time.time()
+        })
+        self.logger.info(f"🔧 Iteration tool result recorded: {tool_name} in iteration {iteration_num}")
+
+    def get_recent_test_failures(self) -> List[Dict[str, Any]]:
+        """Get a list of recent test failures.
+
+        Returns:
+            A list of failure dictionaries containing iteration, error, etc.
+        """
+        failures = []
+        for result in self.test_results:
+            if not result["result"].get("success"):
+                failures.append({
+                    "iteration": result["iteration"],
+                    "error": result["result"].get("report", "Unknown error"),
+                    "timestamp": result["timestamp"]
+                })
+        return failures
+
+    def get_priority_files(self) -> List[str]:
+        """Get the list of priority files identified during iteration.
+
+        Returns:
+            A list of file paths considered priority.
+        """
+        # Convert set to list for consistency
+        return list(self.priority_files)
+
+    def get_modified_files(self) -> List[str]:
+        """Get the list of files modified during iteration.
+
+        Returns:
+            A list of file paths that were modified.
+        """
+        return self.modified_files.copy() # Return a copy to prevent external modification
+
+    def get_current_context(self) -> str:
+        """Get a summary of the current context for the iteration agent.
+
+        Returns:
+            A string summarizing recent failures, modifications, etc.
+        """
+        context_parts = []
+
+        recent_failures = self.get_recent_test_failures()
+        if recent_failures:
+            context_parts.append(f"❌ {len(recent_failures)} Recent Test Failures:")
+            for failure in recent_failures[-2:]: # Show last 2 failures
+                context_parts.append(f"   - Iter {failure['iteration']}: {failure['error'][:100]}...")
+
+        if self.modified_files:
+            context_parts.append(f"✏️ {len(self.modified_files)} Files Modified in Iteration:")
+            for f in self.modified_files[-3:]: # Show last 3 modified files
+                context_parts.append(f"   - {f}")
+
+        if self.priority_files:
+            context_parts.append(f"⭐ {len(self.priority_files)} Priority Files:")
+            for f in list(self.priority_files)[:5]: # Show first 5 priority files
+                context_parts.append(f"   - {f}")
+
+        return "\n".join(context_parts) if context_parts else "✅ No recent failures, modifications, or priority files."
+
+    def record_file_access(self, file_path: str, content: str, iteration: int = None, inner_iteration: int = None):
+        """Record file access during iteration for dependency analysis."""
+        if file_path not in self.file_access_log:
+            self.file_access_log[file_path] = []
+        self.file_access_log[file_path].append({
+            "iteration": iteration,
+            "inner_iteration": inner_iteration,
+            "timestamp": time.time(),
+            "content_preview": content[:100] + "..." if len(content) > 100 else content
+        })
+        self.logger.debug(f"File access recorded: {file_path}")
+    
+    # change over
 
     def _create_default_logger(self) -> logging.Logger:
         """Create default logger"""

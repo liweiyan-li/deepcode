@@ -1,6 +1,6 @@
 $schema: ./schema/mcp-agent.config.schema.json
 anthropic: null
-default_search_server: brave
+default_search_server: github
 document_segmentation:
   enabled: false
   size_threshold_chars: 50000
@@ -17,6 +17,14 @@ logger:
   - file
 mcp:
   servers:
+    github:
+      args:
+      - -y
+      - '@modelcontextprotocol/server-github'
+      command: npx
+      env:
+        GITHUB_PERSONAL_ACCESS_TOKEN: ''
+
     bocha-mcp:
       args:
       - tools/bocha_search_server.py
@@ -24,20 +32,20 @@ mcp:
       env:
         BOCHA_API_KEY: ''
         PYTHONPATH: .
-    brave:
-      # macos and linux should use this
-      args:
-      - -y
-      - '@modelcontextprotocol/server-brave-search'
-      command: npx
+    # brave:
+    #   # macos and linux should use this
+    #   args:
+    #   - -y
+    #   - '@modelcontextprotocol/server-brave-search'
+    #   command: npx
 
       # windows should use this
       # args:
       # # please use the correct path for your system
       # - C:/Users/LEGION/AppData/Roaming/npm/node_modules/@modelcontextprotocol/server-brave-search/dist/index.js
       # command: node
-      env:
-        BRAVE_API_KEY: ''
+      # env:
+      #   BRAVE_API_KEY: ''
     filesystem:
       # macos and linux should use this
       args:
@@ -53,6 +61,14 @@ mcp:
       # - .
       # command: node
 
+    code-iteration:
+      args:
+      - tools/code_implementation_server.py
+      command: python
+      description: Paper code reproduction tool server - provides file operations,
+          code execution, search and other functions
+      env:
+          PYTHONPATH: .
 
     code-implementation:
       args:
@@ -103,16 +119,15 @@ mcp:
 # LLM Provider Priority (选择使用哪个LLM / Choose which LLM to use)
 # Options: "anthropic", "google", "openai"
 # If not set or provider unavailable, will fallback to first available provider
-llm_provider: "google"  # 设置为 "google", "anthropic", 或 "openai"
+llm_provider: "openai"  # 设置为 "google", "anthropic", 或 "openai"
 
 openai:
   base_max_tokens: 40000
   # default_model: google/gemini-2.5-pro
-  # default_model: anthropic/claude-sonnet-4.5
+  default_model: doubao-seed-1-6-251015
   # default_model: openai/gpt-oss-120b
   # default_model: deepseek/deepseek-v3.2-exp
   # default_model: moonshotai/kimi-k2-thinking
-  default_model: doubao-seed-1-6-thinking-250715
   reasoning_effort: low  # Only for thinking models
   max_tokens_policy: adaptive
   retry_max_tokens: 32768

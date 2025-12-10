@@ -24,6 +24,96 @@ from workflows.agent_orchestration_engine import (
 )
 from .sidebar_feed import log_sidebar_event, ensure_sidebar_logging
 
+# handlers.txt (添加新的处理函数)
+
+import asyncio
+from workflows.code_iteration_workflow import CodeIterationWorkflow
+
+async def run_iteration_async(user_intent: str, target_directory: str, original_code_dir: str):
+    """异步运行迭代工作流的辅助函数"""
+    workflow = CodeIterationWorkflow() # 实例化工作流
+    print("实例化代码迭代工作流成功")
+    try:
+        # 设置一个合理的超时时间，防止 LLM 无响应时无限等待
+        timeout_seconds = 600  # 例如，10分钟
+        result = await asyncio.wait_for(
+            workflow.run_iteration(
+                user_intent=user_intent,
+                target_directory=target_directory,
+                original_code_dir=original_code_dir,
+                iteration_dir_name="iteration_bug_fix",
+                max_iterations=3,
+                enable_read_tools=True
+                # test_report_before=st.session_state.get("test_report_before"), # 如果有
+            ),
+            timeout=timeout_seconds
+        )
+        return result
+    except asyncio.TimeoutError:
+        print(f"迭代过程超时 ({timeout_seconds} 秒)")
+        return {"status": "iteration_error", "error": f"迭代过程超时 ({timeout_seconds} 秒)"}
+    except Exception as e:
+        print(f"迭代工作流执行异常: {e}")
+        return {"status": "iteration_error", "error": str(e)}
+
+def handle_iteration_request():
+    """处理用户提交的迭代请求"""
+    if st.session_state.running_iteration:
+        # 防止重复提交
+        return
+
+    feedback = st.session_state.user_iteration_feedback.strip()
+    print(f"用户反馈: {feedback}")
+    if not feedback:
+        st.warning("请提供修改意见。")
+        return
+
+    # --- 从 session_state 获取必要的路径信息 ---
+    target_directory = st.session_state.get("iteration_target_directory")
+    # 为了测试，暂时硬编码
+    # target_directory = "/home/user02/deepcode/deepcode-wei/deepcode_lab/papers/14"
+    original_code_dir = st.session_state.get("iteration_original_code_dir", "generate_code")
+    print(f"目标代码目录: {target_directory}")
+    if not target_directory:
+        st.error("无法获取目标代码目录 (target_directory)，无法进行迭代。")
+        return
+    if not original_code_dir:
+        st.error("无法获取原始代码目录 (original_code_dir)，无法进行迭代。")
+        return
+
+    # --- 设置状态，开始迭代 ---
+    st.session_state.running_iteration = True
+    st.session_state.iteration_needed = False # 隐藏迭代询问
+    # 清空上一次的迭代结果（如果有的话）
+    if "iteration_result" in st.session_state:
+        print("清除上一次的迭代结果")
+        del st.session_state["iteration_result"]
+    # 注意：这里不再调用 st.rerun() 来启动后台任务
+
+    # --- 运行迭代 ---
+    try:
+        print("开始运行代码迭代工作流...")
+        # 使用 asyncio.run 在当前上下文中运行异步函数
+        # 这是推荐的在 Streamlit UI 回调中运行顶层异步任务的方式
+        iteration_result = asyncio.run(run_iteration_async(feedback, target_directory, original_code_dir))
+
+        # --- 处理迭代结果 ---
+        st.session_state.iteration_result = iteration_result
+        st.session_state.running_iteration = False
+        print("代码迭代工作流执行完成。")
+
+    except Exception as e:
+        print(f"运行迭代工作流时发生异常: {e}")
+        st.error(f"运行迭代工作流时发生错误: {e}")
+        st.session_state.running_iteration = False
+        st.session_state.iteration_result = {"status": "iteration_error", "error": str(e)}
+
+    # --- 在 try/except 块结束后，刷新 UI 以显示最终结果 ---
+    st.rerun() # <--- 在所有处理完成后刷新 UI
+
+
+
+
 
 def _emergency_cleanup():
     """
@@ -111,7 +201,12 @@ async def process_input_async(
 
             # Initialize progress
             if progress_callback:
-                progress_callback(5, "🚀 Initializing AI research engine...")
+                if input_type == "chat":
+                    progress_callback(
+                        5, "🚀 Initializing chat-based planning pipeline..."
+                    )
+                else:
+                    progress_callback(5, "🚀 Initializing AI research engine...")
 
             # Use traditional multi-agent research pipeline for files/URLs
             repo_result = await execute_multi_agent_research_pipeline(
@@ -120,6 +215,7 @@ async def process_input_async(
                 progress_callback,
                 enable_indexing=enable_indexing,  # Pass indexing control parameter
             )
+                
 
             return {
                 "analysis_result": "Integrated into complete workflow",
@@ -378,17 +474,28 @@ def handle_processing_workflow(
     )
 
     # Display enhanced progress components
+    chat_mode = input_type == "chat"
     progress_bar, status_text, step_indicators, workflow_steps = (
-        enhanced_progress_display_component(enable_indexing)
+        enhanced_progress_display_component(enable_indexing, chat_mode)
     )
     log_sidebar_event(
         "SYSTEM",
-        "Workflow started (research mode)",
+        f"Workflow started ({'guided/chat' if chat_mode else 'research'} mode)",
         extra={"input_type": input_type, "indexing": enable_indexing},
     )
 
     # Step mapping: map progress percentages to step indices - adjust based on mode and indexing toggle
-    if not enable_indexing:
+    if chat_mode:
+        # Chat mode step mapping: Initialize -> Planning -> Setup -> Save Plan -> Implement
+        step_mapping = {
+            5: 0,  # Initialize
+            30: 1,  # Planning (analyzing requirements)
+            50: 2,  # Setup (creating workspace)
+            70: 3,  # Save Plan (saving implementation plan)
+            85: 4,  # Implement (generating code)
+            100: 4,  # Complete
+        }
+    elif not enable_indexing:
         # Skip indexing-related steps progress mapping - fast mode order: Initialize -> Analyze -> Download -> Plan -> Implement
         step_mapping = {
             5: 0,  # Initialize
@@ -444,7 +551,9 @@ def handle_processing_workflow(
         time.sleep(0.3)  # Brief pause for users to see progress changes
 
     # Step 1: Initialization
-    if enable_indexing:
+    if chat_mode:
+        update_progress(5, "🚀 Initializing chat-based planning engine...")
+    elif enable_indexing:
         update_progress(5, "🚀 Initializing AI research engine and loading models...")
     else:
         update_progress(
@@ -480,6 +589,10 @@ def handle_processing_workflow(
 
     # Update final status based on results
     if result["status"] == "success":
+        repo_result = result.get("repo_result", {})
+        st.session_state.iteration_target_directory = repo_result# 或 result.target_directory
+        st.session_state.iteration_original_code_dir = "generate_code" # 或从 result 中获取
+        st.session_state.iteration_needed = True # 标记需要询问迭代
         # Complete all steps
         update_progress(100, "✅ All processing stages completed successfully!")
         update_step_indicator(
@@ -488,7 +601,12 @@ def handle_processing_workflow(
 
         # Display success information
         st.balloons()  # Add celebration animation
-        if enable_indexing:
+        if chat_mode:
+            display_status(
+                "🎉 Chat workflow completed! Your requirements have been analyzed and code has been generated.",
+                "success",
+            )
+        elif enable_indexing:
             display_status(
                 "🎉 Workflow completed! Your research paper has been successfully processed and code has been generated.",
                 "success",
@@ -596,6 +714,203 @@ def cleanup_temp_file(input_source: str, input_type: str):
             logging.getLogger(__name__).warning(
                 f"Failed to cleanup temp file {input_source}: {e}"
             )
+
+
+async def handle_requirement_analysis_workflow(
+    user_input: str, analysis_mode: str, user_answers: Dict[str, str] = None
+) -> Dict[str, Any]:
+    """
+    Handle requirement analysis workflow
+
+    Args:
+        user_input: User initial requirements
+        analysis_mode: Analysis mode ("generate_questions" or "summarize_requirements")
+        user_answers: User answer dictionary
+
+    Returns:
+        Processing result dictionary
+    """
+    try:
+        # Import required modules
+        from workflows.agent_orchestration_engine import (
+            execute_requirement_analysis_workflow,
+        )
+
+        # Create progress callback function
+        def update_progress(progress: int, message: str):
+            # Display progress in Streamlit
+            st.session_state.current_progress = progress
+            st.session_state.current_message = message
+
+        # Execute requirement analysis workflow
+        result = await execute_requirement_analysis_workflow(
+            user_input=user_input,
+            analysis_mode=analysis_mode,
+            user_answers=user_answers,
+            logger=None,  # Can pass in logger
+            progress_callback=update_progress,
+        )
+
+        return result
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "message": f"Requirement analysis workflow execution failed: {str(e)}",
+        }
+
+
+async def handle_requirement_modification_workflow(
+    current_requirements: str, modification_feedback: str
+) -> Dict[str, Any]:
+    """
+    Handle requirement modification workflow
+
+    Args:
+        current_requirements: Current requirement document content
+        modification_feedback: User's modification requests and feedback
+
+    Returns:
+        Processing result dictionary
+    """
+    try:
+        # Import required modules
+        from workflows.agents.requirement_analysis_agent import RequirementAnalysisAgent
+
+        # Create progress callback function
+        def update_progress(progress: int, message: str):
+            # Display progress in Streamlit
+            st.session_state.current_progress = progress
+            st.session_state.current_message = message
+
+        update_progress(10, "🔧 Initializing requirement modification agent...")
+
+        # Initialize RequirementAnalysisAgent
+        agent = RequirementAnalysisAgent()
+
+        # Initialize agent (LLM is initialized internally)
+        await agent.initialize()
+
+        update_progress(50, "✏️ Modifying requirements based on your feedback...")
+
+        # Modify requirements
+        result = await agent.modify_requirements(
+            current_requirements=current_requirements,
+            modification_feedback=modification_feedback,
+        )
+
+        # Cleanup
+        await agent.cleanup()
+
+        update_progress(100, "✅ Requirements modification completed!")
+
+        return {
+            "status": "success",
+            "result": result,
+            "message": "Requirements modification completed successfully",
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "message": f"Requirements modification workflow execution failed: {str(e)}",
+        }
+
+
+def handle_guided_mode_processing():
+    """Handle asynchronous processing for guided mode"""
+    # Check if questions need to be generated
+    if st.session_state.get("questions_generating", False):
+        st.session_state.questions_generating = False
+
+        # Asynchronously generate questions
+        initial_req = st.session_state.get("initial_requirement", "")
+        if initial_req:
+            try:
+                # Use asynchronous processing to generate questions
+                result = run_async_task_simple(
+                    handle_requirement_analysis_workflow(
+                        user_input=initial_req, analysis_mode="generate_questions"
+                    )
+                )
+
+                if result["status"] == "success":
+                    # Parse JSON result
+                    import json
+
+                    questions = json.loads(result["result"])
+                    st.session_state.generated_questions = questions
+                else:
+                    st.error(
+                        f"Question generation failed: {result.get('error', 'Unknown error')}"
+                    )
+
+            except Exception as e:
+                st.error(f"Question generation exception: {str(e)}")
+
+    # Check if detailed requirements need to be generated
+    if st.session_state.get("requirements_generating", False):
+        st.session_state.requirements_generating = False
+
+        # Asynchronously generate detailed requirements
+        initial_req = st.session_state.get("initial_requirement", "")
+        user_answers = st.session_state.get("user_answers", {})
+
+        if initial_req:
+            try:
+                # Use asynchronous processing to generate requirement summary
+                result = run_async_task_simple(
+                    handle_requirement_analysis_workflow(
+                        user_input=initial_req,
+                        analysis_mode="summarize_requirements",
+                        user_answers=user_answers,
+                    )
+                )
+
+                if result["status"] == "success":
+                    st.session_state.detailed_requirements = result["result"]
+                else:
+                    st.error(
+                        f"Requirement summary generation failed: {result.get('error', 'Unknown error')}"
+                    )
+
+            except Exception as e:
+                st.error(f"Requirement summary generation exception: {str(e)}")
+
+    # Check if requirements need to be edited
+    if st.session_state.get("requirements_editing", False):
+        st.session_state.requirements_editing = False
+        st.info("🔧 Starting requirement modification process...")
+
+        # Asynchronously modify requirements based on user feedback
+        current_requirements = st.session_state.get("detailed_requirements", "")
+        edit_feedback = st.session_state.get("edit_feedback", "")
+
+        if current_requirements and edit_feedback:
+            try:
+                # Use asynchronous processing to modify requirements
+                result = run_async_task_simple(
+                    handle_requirement_modification_workflow(
+                        current_requirements=current_requirements,
+                        modification_feedback=edit_feedback,
+                    )
+                )
+
+                if result["status"] == "success":
+                    st.session_state.detailed_requirements = result["result"]
+                    st.session_state.requirement_analysis_step = "summary"
+                    st.session_state.edit_feedback = ""
+                    st.success("✅ Requirements updated successfully!")
+                    st.rerun()
+                else:
+                    st.error(
+                        f"Requirements modification failed: {result.get('error', 'Unknown error')}"
+                    )
+
+            except Exception as e:
+                st.error(f"Requirements modification exception: {str(e)}")
 
 
 def _background_workflow_runner(
@@ -804,6 +1119,35 @@ def initialize_session_state():
             False  # Default enable indexing functionality
         )
 
+    # Requirement analysis related states
+    if "requirement_analysis_mode" not in st.session_state:
+        st.session_state.requirement_analysis_mode = "direct"  # direct/guided
+    if "requirement_analysis_step" not in st.session_state:
+        st.session_state.requirement_analysis_step = "input"  # input/questions/summary
+    if "generated_questions" not in st.session_state:
+        st.session_state.generated_questions = []
+    if "user_answers" not in st.session_state:
+        st.session_state.user_answers = {}
+    if "detailed_requirements" not in st.session_state:
+        st.session_state.detailed_requirements = ""
+    if "initial_requirement" not in st.session_state:
+        st.session_state.initial_requirement = ""
+    if "questions_generating" not in st.session_state:
+        st.session_state.questions_generating = False
+    if "requirements_generating" not in st.session_state:
+        st.session_state.requirements_generating = False
+    if "requirements_confirmed" not in st.session_state:
+        st.session_state.requirements_confirmed = False
+    if "edit_feedback" not in st.session_state:
+        st.session_state.edit_feedback = ""
+    if "requirements_editing" not in st.session_state:
+        st.session_state.requirements_editing = False
+    if "guided_initial_requirement" not in st.session_state:
+        st.session_state.guided_initial_requirement = ""
+    if "guided_edit_feedback" not in st.session_state:
+        st.session_state.guided_edit_feedback = ""
+    if "confirmed_requirement_text" not in st.session_state:
+        st.session_state.confirmed_requirement_text = None
     if "sidebar_events" not in st.session_state:
         st.session_state.sidebar_events = []
     ensure_sidebar_logging()
@@ -819,6 +1163,20 @@ def initialize_session_state():
         st.session_state.workflow_input_source = None
     if "workflow_input_type" not in st.session_state:
         st.session_state.workflow_input_type = None
+    if "guided_payload" not in st.session_state:
+        st.session_state.guided_payload = None
+    if "iteration_needed" not in st.session_state:
+        st.session_state.iteration_needed = False # 初始生成完成后，是否需要迭代
+    if "user_iteration_feedback" not in st.session_state:
+        st.session_state.user_iteration_feedback = "" # 用户提供的迭代反馈
+    if "running_iteration" not in st.session_state:
+        st.session_state.running_iteration = False
+    
+    if "iteration_target_directory" not in st.session_state:
+        st.session_state.iteration_target_directory = None
+    if "iteration_original_code_dir" not in st.session_state:
+        st.session_state.iteration_original_code_dir = "generate_code"
+        
 
 
 def cleanup_resources():

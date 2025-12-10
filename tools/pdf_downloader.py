@@ -87,7 +87,7 @@ def format_warning_message(action: str, warning: str) -> str:
 
 
 def _get_mineru_api_key() -> Optional[str]:
-    secrets_path = "/home/user02/deepcode/deepcode/mcp_agent.secrets.yaml"
+    secrets_path = "mcp_agent.secrets.yaml"
     key = None
     try:
         import yaml  # type: ignore

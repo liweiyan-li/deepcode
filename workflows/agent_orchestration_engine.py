@@ -642,21 +642,17 @@ async def run_code_analyzer(
     if paper_content:
         agent_config = {
             "concept_analysis": [],
-            "algorithm_analysis": ["brave"],
-            "code_planner": [
-                "brave"
-            ],  # Empty list instead of None - code planner doesn't need tools when paper content is provided
+            "algorithm_analysis": search_server_names,
+            "code_planner": search_server_names,
         }
-        # agent_config = {
-        #     "concept_analysis": [],
-        #     "algorithm_analysis": [],
-        #     "code_planner": [],  # Empty list instead of None - code planner doesn't need tools when paper content is provided
-        # }
     else:
+        base_servers = list(search_server_names)
+        if "filesystem" not in base_servers:
+            base_servers.append("filesystem")
         agent_config = {
             "concept_analysis": ["filesystem"],
-            "algorithm_analysis": ["brave", "filesystem"],
-            "code_planner": ["brave", "filesystem"],
+            "algorithm_analysis": base_servers,
+            "code_planner": base_servers,
         }
 
     print(f"   Agent configurations: {agent_config}")
@@ -883,6 +879,7 @@ The goal is to create a reproduction plan detailed enough for independent implem
                 raise
 
     print(f"⚠️ Returning potentially incomplete result after {max_retries} attempts")
+    # todo
     return result
 
 
@@ -1259,7 +1256,8 @@ async def orchestrate_document_preprocessing_agent(
 
 
 async def orchestrate_code_planning_agent(
-    dir_info: Dict[str, str], logger, progress_callback: Optional[Callable] = None
+    dir_info: Dict[str, str], logger, progress_callback: Optional[Callable] = None,
+    skip_if_code_exists: bool = False
 ):
     """
     Orchestrate intelligent code planning with automated design analysis.
@@ -1272,6 +1270,56 @@ async def orchestrate_code_planning_agent(
         logger: Logger instance for planning tracking
         progress_callback: Progress callback function for monitoring
     """
+    code_dir_path = "/home/user02/deepcode/deepcode-wei/deepcode_lab/papers/14/generate_code"
+    if skip_if_code_exists and os.path.exists(code_dir_path) and os.path.isdir(code_dir_path):
+        print(f"⚠️  'generate_code' directory found at {code_dir_path}. Skipping planning and creating a mock plan.")
+        
+        # Define the path for the initial plan
+        initial_plan_path = dir_info["initial_plan_path"]
+
+        # Create a mock initial plan content. This should be a minimal, valid plan
+        # that the CodeImplementationWorkflow can process.
+        # The content should ideally list the files that already exist in generate_code.
+        mock_plan_content_lines = [
+            "# Mock Initial Plan for Testing Iteration",
+            "This is a simulated plan generated to skip the planning phase for testing purposes.",
+            "It lists the files that are expected to be in the 'generate_code' directory.",
+            "",
+            "**File Structure to Implement:**",
+        ]
+
+        # Optionally, scan the generate_code directory to list files in the mock plan
+        try:
+            for root, dirs, files in os.walk(code_dir_path):
+                # Calculate the relative path from generate_code
+                rel_path = os.path.relpath(root, code_dir_path)
+                if rel_path != '.':
+                    mock_plan_content_lines.append(f"- {rel_path}/ (directory)")
+                for file in sorted(files):
+                    if not file.startswith('.'): # Ignore hidden files
+                        full_file_path = os.path.join(root, file)
+                        rel_file_path = os.path.relpath(full_file_path, code_dir_path)
+                        mock_plan_content_lines.append(f"- {rel_file_path}")
+        except Exception as e:
+            logger.warning(f"Could not scan generate_code for mock plan: {e}")
+            # Fallback to a very simple plan
+            mock_plan_content_lines.append("# Could not list files, using a placeholder.")
+            mock_plan_content_lines.append("- placeholder_file.py")
+
+        mock_plan_content = "\n".join(mock_plan_content_lines)
+
+        # Write the mock plan to the expected file path
+        os.makedirs(os.path.dirname(initial_plan_path), exist_ok=True) # Ensure parent dir exists
+        with open(initial_plan_path, "w", encoding="utf-8") as f:
+            f.write(mock_plan_content)
+        
+        print(f"📝 Mock initial plan created at {initial_plan_path}")
+        return {"status": "success", "message": "Mock plan created for testing."}
+    
+    
+    
+    
+    
     if progress_callback:
         progress_callback(40, "🏗️ Synthesizing intelligent code architecture...")
 
@@ -1512,6 +1560,7 @@ async def synthesize_code_implementation_agent(
     logger,
     progress_callback: Optional[Callable] = None,
     enable_indexing: bool = True,
+    skip_initial_if_exists: bool = False,
 ) -> Dict:
     """
     Synthesize intelligent code implementation with automated development.
@@ -1528,6 +1577,34 @@ async def synthesize_code_implementation_agent(
     Returns:
         dict: Comprehensive code implementation synthesis result
     """
+    code_dir_path = "/home/user02/deepcode/deepcode-wei/deepcode_lab/papers/14/generate_code"
+    if skip_initial_if_exists and os.path.exists(code_dir_path) and os.path.isdir(code_dir_path):
+        print(f"⚠️  'generate_code' directory found at {code_dir_path}. Skipping initial implementation.")
+        print("✅ Returning simulated initial success result for iteration.")
+
+        # Simulate the result structure returned by run_workflow on success
+        simulated_result = {
+            "status": "success", # This is the key status for the UI logic
+            "plan_file": dir_info.get("initial_plan_path", "N/A"), # Or simulate plan path
+            "target_directory": dir_info["paper_dir"],
+            "code_directory": code_dir_path, # Point to the existing directory
+            "results": {
+                "message": "Initial implementation skipped. Directory 'generate_code' already exists.",
+                "directory": code_dir_path
+            },
+            "mcp_architecture": "standard",
+        }
+
+        # Save a simulated report (optional, but might be expected by downstream logic)
+        try:
+            with open(dir_info["implementation_report_path"], "w", encoding="utf-8") as f:
+                f.write(str(simulated_result))
+            print(f"📝 Simulated implementation report saved to {dir_info['implementation_report_path']}")
+        except Exception as e:
+            logger.warning(f"Could not save simulated report: {e}")
+
+        return simulated_result
+    
     if progress_callback:
         progress_callback(85, "🔬 Synthesizing intelligent code implementation...")
 
@@ -1574,13 +1651,13 @@ async def synthesize_code_implementation_agent(
 
             else:
                 print(
-                    f"Code implementation failed: {implementation_result.get('message', 'Unknown error')}"
+                    f"❌ Code implementation failed: {implementation_result.get('message', 'Unknown error')}"
                 )
 
             return implementation_result
         else:
             print(
-                f"Initial plan file not found at {dir_info['initial_plan_path']}, skipping code implementation"
+                f"⚠️ Initial plan file not found at {dir_info['initial_plan_path']}, skipping code implementation"
             )
             return {
                 "status": "warning",
@@ -1770,7 +1847,8 @@ async def execute_multi_agent_research_pipeline(
             pipeline_summary += (
                 f"\n📁 Code generated in: {implementation_result['code_directory']}"
             )
-            return pipeline_summary
+            return implementation_result["target_directory"]
+            # return pipeline_summary
         elif implementation_result["status"] == "warning":
             pipeline_summary += (
                 f"\n⚠️ Code implementation: {implementation_result['message']}"
