@@ -33,7 +33,12 @@ from prompts.code_prompts import (
 from workflows.agents import CodeImplementationAgent
 from workflows.agents.memory_agent_concise import ConciseMemoryAgent
 from config.mcp_tool_definitions import get_mcp_tools
-from utils.llm_utils import get_preferred_llm_class, get_default_models
+from utils.llm_utils import (
+    get_preferred_llm_class,
+    get_default_models,
+    collect_media_assets,
+    compose_media_section,
+)
 # DialogueLogger removed - no longer needed
 
 
@@ -264,6 +269,8 @@ Requirements:
 
             # ---
             # **START:** Review the plan above and begin implementation."""
+            media = collect_media_assets(target_directory)
+            media_section = compose_media_section(media)
             implementation_message = f"""**Task: Implement code based on the following reproduction plan**
 
 **Code Reproduction Plan:**
@@ -271,7 +278,12 @@ Requirements:
 
 **Working Directory:** {code_directory}
 
-**Current Objective:** Begin implementation by analyzing the plan structure, examining the current project layout, and implementing the first foundation file according to the plan's priority order."""
+**Current Objective:** Begin implementation by analyzing the plan structure, examining the current project layout, and implementing the first foundation file according to the plan's priority order. Use ALL images from the paper (figures/algorithm boxes) when interpreting architecture and algorithm details.
+
+=== PAPER MEDIA (images/tables) ===
+{media_section}
+=== END MEDIA ===
+"""
 
             messages.append({"role": "user", "content": implementation_message})
 
@@ -585,10 +597,18 @@ Requirements:
                 openai_config = self.api_config.get("openai", {})
                 base_url = openai_config.get("base_url")
 
+                import os as _os
+                ark_key_env = _os.environ.get("ARK_API_KEY")
+                if not ark_key_env:
+                    try:
+                        _os.environ["ARK_API_KEY"] = openai_key
+                    except Exception:
+                        pass
+                api_key_for_client = _os.environ.get("ARK_API_KEY") or openai_key
                 if base_url:
-                    client = AsyncOpenAI(api_key=openai_key, base_url=base_url)
+                    client = AsyncOpenAI(api_key=api_key_for_client, base_url=base_url)
                 else:
-                    client = AsyncOpenAI(api_key=openai_key)
+                    client = AsyncOpenAI(api_key=api_key_for_client)
 
                 model_name = self.default_models.get("openai", "o3-mini")
 

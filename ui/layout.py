@@ -10,7 +10,9 @@ from .components import (
     display_features,
     display_header,
     footer_component,
+    guided_requirement_workflow,
     input_method_selector,
+    requirement_mode_selector,
     results_display_component,
     sidebar_control_panel,
     system_status_component,
@@ -20,6 +22,7 @@ from .handlers import (
     initialize_session_state,
     handle_start_processing_button,
     handle_error_display,
+    handle_guided_mode_processing,
 )
 
 
@@ -57,6 +60,9 @@ def main_layout():
 
     if show_results and last_result:
         results_display_component(last_result, st.session_state.task_counter)
+        from .components import iteration_prompt_component, iteration_status_component
+        iteration_prompt_component()
+        iteration_status_component()
     else:
         # Landing State
         display_features()
@@ -79,26 +85,43 @@ def main_layout():
 def render_input_area():
     """Handles the logic for which input to show"""
 
+    # Handle guided mode async processing (background)
+    handle_guided_mode_processing()
 
+    mode = requirement_mode_selector()
+    is_guided = mode == "guided"
     processing = st.session_state.get("processing", False)
+    requirements_confirmed = st.session_state.get("requirements_confirmed", False)
 
     input_source: Optional[str] = None
     input_type: Optional[str] = None
 
     with st.container():
-        input_source, input_type = input_method_selector(
-            st.session_state.task_counter
-        )
+        if is_guided:
+            input_source, _ = guided_requirement_workflow()
+            input_type = "chat" if input_source else None
+        else:
+            input_source, input_type = input_method_selector(
+                st.session_state.task_counter
+            )
 
         st.markdown('<div style="height: 1.5rem;"></div>', unsafe_allow_html=True)
 
-        if input_source and not processing:
+        if is_guided and requirements_confirmed and input_source and not processing:
+            payload = input_source
+            st.session_state.requirements_confirmed = False
+            st.session_state.confirmed_requirement_text = None
+            handle_start_processing_button(payload, input_type or "chat")
+
+        elif input_source and not processing:
             col1, col2, col3 = st.columns([1, 2, 1])
             with col2:
                 if st.button(
                     "START CODING 🚀", type="primary", use_container_width=True
                 ):
-                    handle_start_processing_button(input_source, input_type or "file")
+                    if is_guided:
+                        st.session_state.confirmed_requirement_text = None
+                    handle_start_processing_button(input_source, input_type or "chat")
 
         elif processing:
             st.markdown(
@@ -111,7 +134,7 @@ def render_input_area():
                 unsafe_allow_html=True,
             )
 
-        elif not input_source:
+        elif not input_source and not is_guided:
             st.markdown(
                 """
                 <div style="text-align:center; color:rgba(255,255,255,0.3); font-family:var(--font-code); font-size:0.8rem;">

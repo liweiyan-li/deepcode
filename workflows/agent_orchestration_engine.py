@@ -56,6 +56,12 @@ from utils.llm_utils import (
     get_adaptive_agent_config,
     get_adaptive_prompts,
     get_token_limits,
+    get_default_models,
+    is_ark_openai,
+    generate_multimodal_plan,
+    collect_media_assets,
+    compose_media_section,
+    ensure_ark_api_key_env,
 )
 from workflows.agents.document_segmentation_agent import prepare_document_segments
 
@@ -636,21 +642,17 @@ async def run_code_analyzer(
     if paper_content:
         agent_config = {
             "concept_analysis": [],
-            "algorithm_analysis": ["brave"],
-            "code_planner": [
-                "brave"
-            ],  # Empty list instead of None - code planner doesn't need tools when paper content is provided
+            "algorithm_analysis": search_server_names,
+            "code_planner": search_server_names,
         }
-        # agent_config = {
-        #     "concept_analysis": [],
-        #     "algorithm_analysis": [],
-        #     "code_planner": [],  # Empty list instead of None - code planner doesn't need tools when paper content is provided
-        # }
     else:
+        base_servers = list(search_server_names)
+        if "filesystem" not in base_servers:
+            base_servers.append("filesystem")
         agent_config = {
             "concept_analysis": ["filesystem"],
-            "algorithm_analysis": ["brave", "filesystem"],
-            "code_planner": ["brave", "filesystem"],
+            "algorithm_analysis": base_servers,
+            "code_planner": base_servers,
         }
 
     print(f"   Agent configurations: {agent_config}")
@@ -678,10 +680,13 @@ async def run_code_analyzer(
     )
 
     base_max_tokens, _ = get_token_limits()
+    ark_enabled, _ark_url = is_ark_openai()
 
     # STEP 3: Configure parameters - minimal tool filter since paper content is provided
     if use_segmentation:
         max_tokens_limit = base_max_tokens
+        if ark_enabled:
+            max_tokens_limit = min(max_tokens_limit, 2000)
         temperature = 0.2
         max_iterations = 5
         print(
@@ -697,6 +702,8 @@ async def run_code_analyzer(
         }
     else:
         max_tokens_limit = base_max_tokens
+        if ark_enabled:
+            max_tokens_limit = min(max_tokens_limit, 2000)
         temperature = 0.3
         max_iterations = 2
         print(
@@ -720,29 +727,98 @@ async def run_code_analyzer(
         maxTokens=max_tokens_limit,
         temperature=temperature,
         max_iterations=max_iterations,
-        tool_filter=tool_filter
-        if tool_filter
-        else None,  # None = all tools, empty dict = no filtering
+        tool_filter=tool_filter if tool_filter else None,
     )
 
-    # STEP 4: Construct message with paper content directly included
+    # STEP 4: Attempt multimodal per-stage analysis with images if supported
+    try:
+        if paper_content:
+            models = get_default_models()
+            ark_enabled, _ = is_ark_openai()
+            model_name = (
+                "doubao-seed-1-6-thinking-250715" if ark_enabled else models.get("openai")
+            )
+            ensure_ark_api_key_env("mcp_agent.secrets.yaml")
+            concept_mm = await generate_multimodal_plan(
+                paper_dir=paper_dir,
+                task_prompt=prompts["concept_analysis"],
+                model_name=model_name,
+                max_tokens=max_tokens_limit,
+                temperature=temperature,
+            )
+            algorithm_mm = await generate_multimodal_plan(
+                paper_dir=paper_dir,
+                task_prompt=prompts["algorithm_analysis"],
+                model_name=model_name,
+                max_tokens=max_tokens_limit,
+                temperature=temperature,
+            )
+
+            mm_sections = []
+            if concept_mm:
+                mm_sections.append("# Concept Analysis\n" + concept_mm)
+            if algorithm_mm:
+                mm_sections.append("# Algorithm Analysis\n" + algorithm_mm)
+
+            if mm_sections:
+                planning_input = "\n\n".join(mm_sections)
+                planning_mm = await generate_multimodal_plan(
+                    paper_dir=paper_dir,
+                    task_prompt=prompts["code_planning"] + "\n\n" + planning_input,
+                    model_name=model_name,
+                    max_tokens=max_tokens_limit,
+                    temperature=temperature,
+                )
+                if planning_mm and len(planning_mm.strip()) > 0:
+                    return planning_mm
+    except Exception as e:
+        print(f"⚠️ Multimodal planning failed or unavailable: {e}, falling back to text mode")
+
+    # STEP 5: Always attempt multimodal planning with images; avoid text-only when paper is present
+    message = None
     if paper_content:
-        # Paper content provided directly - LLM only needs to analyze, not read files
-        message = f"""Analyze the research paper provided below. The paper file has been pre-loaded for you.
+        try:
+            models = get_default_models()
+            ark_enabled, _ = is_ark_openai()
+            model_name = (
+                "doubao-seed-1-6-thinking-250715" if ark_enabled else models.get("openai")
+            )
+            ensure_ark_api_key_env("mcp_agent.secrets.yaml")
+            planning_mm2 = await generate_multimodal_plan(
+                paper_dir=paper_dir,
+                task_prompt=prompts["code_planning"]
+                + "\n\n" 
+                + "Use ALL provided images (figures/algorithms) to finalize YAML. The full paper text is below for reference."
+                + "\n\n"
+                + paper_content,
+                model_name=model_name,
+                max_tokens=max_tokens_limit,
+                temperature=temperature,
+            )
+            if planning_mm2 and len(planning_mm2.strip()) > 0:
+                return planning_mm2
+        except Exception as e:
+            print(f"⚠️ Multimodal planning (fallback) failed: {e}")
 
-=== PAPER CONTENT START ===
-{paper_content}
-=== PAPER CONTENT END ===
-
-Based on this paper, generate a comprehensive code reproduction plan that includes:
-
-1. Complete system architecture and component breakdown
-2. All algorithms, formulas, and implementation details
-3. Detailed file structure and implementation roadmap
-
-You may use web search (brave_web_search) if you need clarification on algorithms, methods, or concepts.
-
-The goal is to create a reproduction plan detailed enough for independent implementation."""
+        # Final images-only attempt: ensure images are used even if text handling fails
+        try:
+            models = get_default_models()
+            ark_enabled, _ = is_ark_openai()
+            model_name = (
+                "doubao-seed-1-6-thinking-250715" if ark_enabled else models.get("openai")
+            )
+            final_try_mm = await generate_multimodal_plan(
+                paper_dir=paper_dir,
+                task_prompt=prompts["code_planning"]
+                + "\n\nUse ONLY the images (figures/algorithm boxes) to reconstruct architecture and planning YAML if text is unavailable.",
+                model_name=model_name,
+                max_tokens=max_tokens_limit,
+                temperature=temperature,
+            )
+            if final_try_mm and len(final_try_mm.strip()) > 0:
+                return final_try_mm
+        except Exception:
+            pass
     else:
         # Fallback: paper not found, agents will need to find it
         message = f"""Analyze the research paper in directory: {paper_dir}
@@ -758,7 +834,7 @@ The goal is to create a reproduction plan detailed enough for independent implem
     max_retries = 3
     retry_count = 0
 
-    while retry_count < max_retries:
+    while message is not None and retry_count < max_retries:
         try:
             print(
                 f"🚀 Attempting code analysis (attempt {retry_count + 1}/{max_retries})"
@@ -803,6 +879,7 @@ The goal is to create a reproduction plan detailed enough for independent implem
                 raise
 
     print(f"⚠️ Returning potentially incomplete result after {max_retries} attempts")
+    # todo
     return result
 
 
@@ -969,7 +1046,7 @@ async def synthesize_workspace_infrastructure_agent(
     print(f"   Research workspace: {paper_dir}")
     print("   AI-driven path optimization: active")
 
-    return {
+    info = {
         "paper_dir": paper_dir,
         "standardized_text": result["standardized_text"],
         "reference_path": os.path.join(paper_dir, "reference.txt"),
@@ -981,6 +1058,20 @@ async def synthesize_workspace_infrastructure_agent(
         ),
         "workspace_dir": workspace_dir,
     }
+
+    try:
+        if isinstance(result, dict):
+            images_path = result.get("images_path")
+            if not images_path:
+                candidate = os.path.join(paper_dir, "images")
+                if os.path.isdir(candidate):
+                    images_path = candidate
+            if images_path:
+                info["images_path"] = images_path
+    except Exception:
+        pass
+
+    return info
 
 
 async def orchestrate_reference_intelligence_agent(
@@ -1165,7 +1256,8 @@ async def orchestrate_document_preprocessing_agent(
 
 
 async def orchestrate_code_planning_agent(
-    dir_info: Dict[str, str], logger, progress_callback: Optional[Callable] = None
+    dir_info: Dict[str, str], logger, progress_callback: Optional[Callable] = None,
+    skip_if_code_exists: bool = False
 ):
     """
     Orchestrate intelligent code planning with automated design analysis.
@@ -1178,13 +1270,75 @@ async def orchestrate_code_planning_agent(
         logger: Logger instance for planning tracking
         progress_callback: Progress callback function for monitoring
     """
+    code_dir_path = "/home/user02/deepcode/deepcode-wei/deepcode_lab/papers/14/generate_code"
+    if skip_if_code_exists and os.path.exists(code_dir_path) and os.path.isdir(code_dir_path):
+        print(f"⚠️  'generate_code' directory found at {code_dir_path}. Skipping planning and creating a mock plan.")
+        
+        # Define the path for the initial plan
+        initial_plan_path = dir_info["initial_plan_path"]
+
+        # Create a mock initial plan content. This should be a minimal, valid plan
+        # that the CodeImplementationWorkflow can process.
+        # The content should ideally list the files that already exist in generate_code.
+        mock_plan_content_lines = [
+            "# Mock Initial Plan for Testing Iteration",
+            "This is a simulated plan generated to skip the planning phase for testing purposes.",
+            "It lists the files that are expected to be in the 'generate_code' directory.",
+            "",
+            "**File Structure to Implement:**",
+        ]
+
+        # Optionally, scan the generate_code directory to list files in the mock plan
+        try:
+            for root, dirs, files in os.walk(code_dir_path):
+                # Calculate the relative path from generate_code
+                rel_path = os.path.relpath(root, code_dir_path)
+                if rel_path != '.':
+                    mock_plan_content_lines.append(f"- {rel_path}/ (directory)")
+                for file in sorted(files):
+                    if not file.startswith('.'): # Ignore hidden files
+                        full_file_path = os.path.join(root, file)
+                        rel_file_path = os.path.relpath(full_file_path, code_dir_path)
+                        mock_plan_content_lines.append(f"- {rel_file_path}")
+        except Exception as e:
+            logger.warning(f"Could not scan generate_code for mock plan: {e}")
+            # Fallback to a very simple plan
+            mock_plan_content_lines.append("# Could not list files, using a placeholder.")
+            mock_plan_content_lines.append("- placeholder_file.py")
+
+        mock_plan_content = "\n".join(mock_plan_content_lines)
+
+        # Write the mock plan to the expected file path
+        os.makedirs(os.path.dirname(initial_plan_path), exist_ok=True) # Ensure parent dir exists
+        with open(initial_plan_path, "w", encoding="utf-8") as f:
+            f.write(mock_plan_content)
+        
+        print(f"📝 Mock initial plan created at {initial_plan_path}")
+        return {"status": "success", "message": "Mock plan created for testing."}
+    
+    
+    
+    
+    
     if progress_callback:
         progress_callback(40, "🏗️ Synthesizing intelligent code architecture...")
 
     initial_plan_path = dir_info["initial_plan_path"]
 
-    # Check if initial plan already exists
-    if not os.path.exists(initial_plan_path):
+    # Check for images to decide if we should force regeneration
+    images_dir = os.path.join(dir_info["paper_dir"], "images")
+    has_images = os.path.isdir(images_dir) and any(
+        name.lower().endswith((".png", ".jpg", ".jpeg"))
+        for name in os.listdir(images_dir)
+        if not name.startswith(".")
+    )
+
+    # If images are present, we force regeneration to ensure multimodal context is used.
+    # Otherwise, we only generate if the plan doesn't exist.
+    if has_images or not os.path.exists(initial_plan_path):
+        if has_images and os.path.exists(initial_plan_path):
+            print("🔁 Images detected - forcing plan regeneration with multimodal input...")
+        
         # Use segmentation setting from preprocessing phase
         use_segmentation = dir_info.get("use_segmentation", True)
         print(f"📊 Planning mode: {'Segmented' if use_segmentation else 'Traditional'}")
@@ -1195,6 +1349,9 @@ async def orchestrate_code_planning_agent(
         with open(initial_plan_path, "w", encoding="utf-8") as f:
             f.write(initial_plan_result)
         print(f"Initial plan saved to {initial_plan_path}")
+    else:
+        print(f"✅ Existing initial plan found at {initial_plan_path} (No images to process)")
+    
 
 
 async def automate_repository_acquisition_agent(
@@ -1403,6 +1560,7 @@ async def synthesize_code_implementation_agent(
     logger,
     progress_callback: Optional[Callable] = None,
     enable_indexing: bool = True,
+    skip_initial_if_exists: bool = False,
 ) -> Dict:
     """
     Synthesize intelligent code implementation with automated development.
@@ -1419,6 +1577,34 @@ async def synthesize_code_implementation_agent(
     Returns:
         dict: Comprehensive code implementation synthesis result
     """
+    code_dir_path = "/home/user02/deepcode/deepcode-wei/deepcode_lab/papers/14/generate_code"
+    if skip_initial_if_exists and os.path.exists(code_dir_path) and os.path.isdir(code_dir_path):
+        print(f"⚠️  'generate_code' directory found at {code_dir_path}. Skipping initial implementation.")
+        print("✅ Returning simulated initial success result for iteration.")
+
+        # Simulate the result structure returned by run_workflow on success
+        simulated_result = {
+            "status": "success", # This is the key status for the UI logic
+            "plan_file": dir_info.get("initial_plan_path", "N/A"), # Or simulate plan path
+            "target_directory": dir_info["paper_dir"],
+            "code_directory": code_dir_path, # Point to the existing directory
+            "results": {
+                "message": "Initial implementation skipped. Directory 'generate_code' already exists.",
+                "directory": code_dir_path
+            },
+            "mcp_architecture": "standard",
+        }
+
+        # Save a simulated report (optional, but might be expected by downstream logic)
+        try:
+            with open(dir_info["implementation_report_path"], "w", encoding="utf-8") as f:
+                f.write(str(simulated_result))
+            print(f"📝 Simulated implementation report saved to {dir_info['implementation_report_path']}")
+        except Exception as e:
+            logger.warning(f"Could not save simulated report: {e}")
+
+        return simulated_result
+    
     if progress_callback:
         progress_callback(85, "🔬 Synthesizing intelligent code implementation...")
 
@@ -1465,13 +1651,13 @@ async def synthesize_code_implementation_agent(
 
             else:
                 print(
-                    f"Code implementation failed: {implementation_result.get('message', 'Unknown error')}"
+                    f"❌ Code implementation failed: {implementation_result.get('message', 'Unknown error')}"
                 )
 
             return implementation_result
         else:
             print(
-                f"Initial plan file not found at {dir_info['initial_plan_path']}, skipping code implementation"
+                f"⚠️ Initial plan file not found at {dir_info['initial_plan_path']}, skipping code implementation"
             )
             return {
                 "status": "warning",
@@ -1661,7 +1847,8 @@ async def execute_multi_agent_research_pipeline(
             pipeline_summary += (
                 f"\n📁 Code generated in: {implementation_result['code_directory']}"
             )
-            return pipeline_summary
+            return implementation_result["target_directory"]
+            # return pipeline_summary
         elif implementation_result["status"] == "warning":
             pipeline_summary += (
                 f"\n⚠️ Code implementation: {implementation_result['message']}"
