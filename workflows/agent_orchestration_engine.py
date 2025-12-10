@@ -44,6 +44,7 @@ from prompts.code_prompts import (
     PAPER_DOWNLOADER_PROMPT,
     PAPER_REFERENCE_ANALYZER_PROMPT,
 )
+from prompts.test_agent_prompt import TEST_GENERATION_AGENT_PROMPT
 from utils.file_processor import FileProcessor
 from workflows.code_implementation_workflow import CodeImplementationWorkflow
 from tools.pdf_downloader import move_file_to, download_file_to
@@ -1669,6 +1670,94 @@ async def synthesize_code_implementation_agent(
         return {"status": "error", "message": str(e)}
 
 
+async def orchestrate_test_generation_agent(
+    dir_info: Dict[str, str],
+    implementation_result: Dict,
+    logger,
+    progress_callback: Optional[Callable] = None,
+) -> Dict:
+    """
+    Orchestrate intelligent test generation with automated test suite creation.
+
+    This agent autonomously generates comprehensive test suites for the implemented
+    codebase using AI-powered test design and generation strategies.
+
+    Args:
+        dir_info: Workspace infrastructure metadata
+        implementation_result: Result from code implementation phase
+        logger: Logger instance for test generation tracking
+        progress_callback: Progress callback function for monitoring
+
+    Returns:
+        dict: Comprehensive test generation result
+    """
+    if progress_callback:
+        progress_callback(92, "🧪 Generating comprehensive test suite...")
+
+    print("Initiating intelligent test generation with AI-powered test design...")
+    await asyncio.sleep(2)  # Brief pause before starting test generation
+
+    try:
+        # Check if code implementation was successful
+        if implementation_result.get("status") != "success":
+            print("⚠️ Code implementation was not successful, skipping test generation")
+            return {
+                "status": "skipped",
+                "reason": "code_implementation_failed",
+                "message": "Test generation skipped due to code implementation failure",
+            }
+
+        # Get code directory from implementation result
+        code_directory = implementation_result.get("code_directory")
+        if not code_directory or not os.path.exists(code_directory):
+            print(f"❌ Code directory not found: {code_directory}")
+            return {
+                "status": "error",
+                "message": f"Code directory not found: {code_directory}",
+            }
+
+        print(f"📂 Generating tests for code in: {code_directory}")
+        print(f"📋 Using implementation plan: {dir_info['initial_plan_path']}")
+
+        # Import TestGenerationAgent
+        from workflows.agents.generation_test_agent import TestGenerationAgent
+
+        # Create and use test generation agent
+        async with TestGenerationAgent(logger=logger) as test_agent:
+            print("🤖 Test generation agent initialized")
+
+            # Generate tests using the agent
+            test_summary = await test_agent.generate_tests(
+                code_directory=code_directory,
+                plan_file_path=dir_info['initial_plan_path'],
+                paper_dir=dir_info['paper_dir'],
+            )
+
+            # Save test generation report
+            test_report_path = os.path.join(dir_info["paper_dir"], "test_generation_report.txt")
+            with open(test_report_path, "w", encoding="utf-8") as f:
+                f.write(test_summary.get("raw_result", str(test_summary)))
+            print(f"✅ Test generation report saved to {test_report_path}")
+
+            # Update summary with report path
+            test_summary["report_path"] = test_report_path
+
+            print("✅ Test generation completed successfully!")
+            print(f"📁 Test directory: {test_summary.get('test_directory', 'N/A')}")
+
+            return test_summary
+
+    except Exception as e:
+        print(f"❌ Error during test generation workflow: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "message": str(e),
+            "phase": "test_generation",
+        }
+
+
 async def execute_multi_agent_research_pipeline(
     input_source: str,
     logger,
@@ -1819,6 +1908,11 @@ async def execute_multi_agent_research_pipeline(
             dir_info, logger, progress_callback, enable_indexing
         )
 
+        # Phase 9: Test Generation (NEW PHASE)
+        test_result = await orchestrate_test_generation_agent(
+            dir_info, implementation_result, logger, progress_callback
+        )
+
         # Final Status Report
         if enable_indexing:
             pipeline_summary = (
@@ -1847,18 +1941,32 @@ async def execute_multi_agent_research_pipeline(
             pipeline_summary += (
                 f"\n📁 Code generated in: {implementation_result['code_directory']}"
             )
-            return implementation_result["target_directory"]
-            # return pipeline_summary
         elif implementation_result["status"] == "warning":
             pipeline_summary += (
                 f"\n⚠️ Code implementation: {implementation_result['message']}"
             )
-            return pipeline_summary
         else:
             pipeline_summary += (
                 f"\n❌ Code implementation failed: {implementation_result['message']}"
             )
-            return pipeline_summary
+
+        # Add test generation status to summary (NEW)
+        if test_result["status"] == "success":
+            pipeline_summary += "\n🧪 Test suite generated successfully!"
+            pipeline_summary += (
+                f"\n📁 Tests located in: {test_result.get('test_directory', 'N/A')}"
+            )
+            pipeline_summary += (
+                f"\n💡 Run tests with: pytest {test_result.get('test_directory', 'tests/')}"
+            )
+        elif test_result["status"] == "skipped":
+            pipeline_summary += f"\n🔶 Test generation: {test_result['message']}"
+        elif test_result["status"] == "error":
+            pipeline_summary += (
+                f"\n❌ Test generation failed: {test_result['message']}"
+            )
+
+        return pipeline_summary
 
     except Exception as e:
         print(f"Error in execute_multi_agent_research_pipeline: {e}")
