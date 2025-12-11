@@ -51,16 +51,60 @@
 
 ## 🚀 快速开始 (Quick Start)
 
+### 🔽 克隆存储库
+```bash
+git clone https://github.com/liweiyan-li/DeepCode.git
+cd DeepCode/
+```
+
 ### 1. 环境配置
 
 ```bash
 # 安装项目依赖
 pip install -r requirements.txt
 ```
+```bash
+# 🔑 配置API密钥 (必需)
+# 使用您的API密钥和base_url编辑mcp_agent.secrets.yaml
+```
+```bash
+# 🔑 配置搜索API密钥用于Web搜索 (可选)
+# 编辑mcp_agent.config.yaml设置
+```
+
+
 
 ### 2. 运行
 
 ```bash
-# 启动 DeepCode
-python deepcode.py
+# 使用UV
+uv run streamlit run ui/streamlit_app.py
+# 或使用传统Python
+streamlit run ui/streamlit_app.py
+```
+
+
+
+
+#### 🪟 **Windows用户: 额外的MCP服务器配置**
+
+如果您使用Windows，可能需要在`mcp_agent.config.yaml`中手动配置MCP服务器:
+
+```bash
+# 1. 全局安装MCP服务器
+npm i -g @modelcontextprotocol/server-brave-search
+npm i -g @modelcontextprotocol/server-filesystem
+
+# 2. 找到您的全局node_modules路径
+npm -g root
+```
+
+然后更新您的`mcp_agent.config.yaml`使用绝对路径:
+
+```yaml
+mcp:
+  servers:
+    filesystem:
+      command: "node"
+      args: ["C:/Program Files/nodejs/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js", "."]
 ```
